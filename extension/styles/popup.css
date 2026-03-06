@@ -1,0 +1,329 @@
+/* PasskeyVault Popup Styles */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 380px;
+  min-height: 400px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  color: #1a1a1a;
+  background: #f5f5f5;
+}
+
+/* Header */
+.header {
+  background: #0078d4;
+  color: #fff;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header h1 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.header .lock-indicator {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.2);
+}
+
+.header .lock-indicator.locked {
+  background: #d13438;
+}
+
+.header .lock-indicator.unlocked {
+  background: #107c10;
+}
+
+/* Views */
+.view {
+  display: none;
+  padding: 20px;
+}
+
+.view.active {
+  display: block;
+}
+
+/* Setup View */
+.setup-view .description {
+  color: #555;
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+/* Form Elements */
+.form-group {
+  margin-bottom: 14px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: #333;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.form-group input:focus {
+  border-color: #0078d4;
+  box-shadow: 0 0 0 1px #0078d4;
+}
+
+.form-group .hint {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+}
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+  text-align: center;
+  width: 100%;
+}
+
+.btn-primary {
+  background: #0078d4;
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: #106ebe;
+}
+
+.btn-primary:disabled {
+  background: #a0c4e4;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  background: #d13438;
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: #a4262c;
+}
+
+.btn-secondary {
+  background: #e1e1e1;
+  color: #333;
+}
+
+.btn-secondary:hover {
+  background: #d1d1d1;
+}
+
+.btn-small {
+  padding: 4px 10px;
+  font-size: 12px;
+  width: auto;
+}
+
+/* Status Messages */
+.status {
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  margin-bottom: 12px;
+  display: none;
+}
+
+.status.visible {
+  display: block;
+}
+
+.status.error {
+  background: #fde7e9;
+  color: #a4262c;
+  border: 1px solid #f1bbbc;
+}
+
+.status.success {
+  background: #dff6dd;
+  color: #107c10;
+  border: 1px solid #b7d8b3;
+}
+
+.status.info {
+  background: #e6f2fb;
+  color: #0078d4;
+  border: 1px solid #b3d4ea;
+}
+
+/* Vault Dashboard */
+.dashboard-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.stat-card {
+  background: #fff;
+  border: 1px solid #e1e1e1;
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+}
+
+.stat-card .stat-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #0078d4;
+}
+
+.stat-card .stat-label {
+  font-size: 11px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Passkey List */
+.passkey-list {
+  list-style: none;
+  margin-bottom: 16px;
+}
+
+.passkey-item {
+  background: #fff;
+  border: 1px solid #e1e1e1;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.passkey-item .passkey-icon {
+  width: 36px;
+  height: 36px;
+  background: #e6f2fb;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.passkey-item .passkey-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.passkey-item .passkey-rp {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.passkey-item .passkey-meta {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+}
+
+.passkey-item .passkey-actions {
+  flex-shrink: 0;
+}
+
+.passkey-item .delete-btn {
+  background: none;
+  border: none;
+  color: #d13438;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.passkey-item .delete-btn:hover {
+  background: #fde7e9;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 20px;
+  color: #888;
+}
+
+/* Section Headers */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.section-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #333;
+}
+
+/* Register Form */
+.register-form {
+  background: #fff;
+  border: 1px solid #e1e1e1;
+  border-radius: 6px;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+
+/* Actions Bar */
+.actions-bar {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.actions-bar .btn {
+  flex: 1;
+}
+
+/* Footer */
+.footer {
+  padding: 10px 20px;
+  border-top: 1px solid #e1e1e1;
+  background: #fff;
+  text-align: center;
+}
+
+.footer .version {
+  font-size: 11px;
+  color: #aaa;
+}

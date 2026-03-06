@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "PasskeyVault - Entra ID Authenticator",
+  "version": "1.0.0",
+  "description": "Extension-managed passkey vault and authentication orchestrator for Microsoft Entra ID environments.",
+  "permissions": [
+    "storage",
+    "webNavigation",
+    "webRequest",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://login.microsoftonline.com/*",
+    "https://login.microsoft.com/*",
+    "https://login.windows.net/*",
+    "https://portal.azure.com/*",
+    "https://aadcdn.msftauth.net/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://login.microsoftonline.com/*",
+        "https://login.microsoft.com/*",
+        "https://login.windows.net/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "PasskeyVault"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "minimum_chrome_version": "116"
+}

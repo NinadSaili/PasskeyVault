@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=380">
+  <title>PasskeyVault</title>
+  <link rel="stylesheet" href="styles/popup.css">
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2C9.24 2 7 4.24 7 7v3H6c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-8c0-1.1-.9-2-2-2h-1V7c0-2.76-2.24-5-5-5zm0 2c1.66 0 3 1.34 3 3v3H9V7c0-1.66 1.34-3 3-3zm0 10c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2z" fill="white"/>
+    </svg>
+    <h1>PasskeyVault</h1>
+    <span id="lockIndicator" class="lock-indicator locked">Locked</span>
+  </div>
+
+  <!-- Status Message -->
+  <div id="statusMessage" class="status"></div>
+
+  <!-- Setup View (First Time) -->
+  <div id="setupView" class="view setup-view">
+    <p class="description">
+      Create a secure vault to store your passkeys for Microsoft Entra ID authentication.
+      Your vault is encrypted with AES-256-GCM and protected by your PIN.
+    </p>
+    <div class="form-group">
+      <label for="setupPin">Create Vault PIN</label>
+      <input type="password" id="setupPin" placeholder="Enter PIN (min 4 characters)" autocomplete="off">
+      <div class="hint">This PIN unlocks your passkey vault. Choose something memorable.</div>
+    </div>
+    <div class="form-group">
+      <label for="setupPinConfirm">Confirm PIN</label>
+      <input type="password" id="setupPinConfirm" placeholder="Re-enter PIN" autocomplete="off">
+    </div>
+    <button id="createVaultBtn" class="btn btn-primary" disabled>Create Vault</button>
+  </div>
+
+  <!-- Unlock View -->
+  <div id="unlockView" class="view">
+    <div class="form-group">
+      <label for="unlockPin">Vault PIN</label>
+      <input type="password" id="unlockPin" placeholder="Enter your vault PIN" autocomplete="off">
+    </div>
+    <button id="unlockBtn" class="btn btn-primary">Unlock</button>
+  </div>
+
+  <!-- Dashboard View (Unlocked) -->
+  <div id="dashboardView" class="view">
+    <!-- Stats -->
+    <div class="dashboard-stats">
+      <div class="stat-card">
+        <div id="statPasskeys" class="stat-value">0</div>
+        <div class="stat-label">Passkeys</div>
+      </div>
+      <div class="stat-card">
+        <div id="statUsers" class="stat-value">0</div>
+        <div class="stat-label">Users</div>
+      </div>
+    </div>
+
+    <!-- Passkeys List -->
+    <div class="section-header">
+      <h2>Stored Passkeys</h2>
+      <button id="showRegisterBtn" class="btn btn-primary btn-small">+ Register</button>
+    </div>
+
+    <div id="registerForm" class="register-form" style="display:none;">
+      <div class="form-group">
+        <label for="regDisplayName">Display Name</label>
+        <input type="text" id="regDisplayName" placeholder="e.g. John Doe">
+      </div>
+      <div class="form-group">
+        <label for="regUpn">Entra UPN (Email)</label>
+        <input type="email" id="regUpn" placeholder="user@contoso.com">
+      </div>
+      <div class="form-group">
+        <label for="regRpId">RP ID</label>
+        <input type="text" id="regRpId" value="login.microsoft.com" placeholder="login.microsoft.com">
+      </div>
+      <div class="actions-bar">
+        <button id="cancelRegisterBtn" class="btn btn-secondary btn-small">Cancel</button>
+        <button id="registerBtn" class="btn btn-primary btn-small">Register Passkey</button>
+      </div>
+    </div>
+
+    <ul id="passkeyList" class="passkey-list"></ul>
+    <div id="emptyState" class="empty-state" style="display:none;">
+      No passkeys stored yet. Register one to get started.
+    </div>
+
+    <!-- Actions -->
+    <div class="actions-bar">
+      <button id="lockBtn" class="btn btn-secondary">Lock Vault</button>
+      <button id="destroyBtn" class="btn btn-danger">Reset Vault</button>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span class="version">PasskeyVault v1.0.0</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
