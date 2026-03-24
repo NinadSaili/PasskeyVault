@@ -78,6 +78,7 @@ const VaultEngine = (() => {
       version: VAULT_VERSION,
       users: [],
       passkeys: [],
+      credentials: [],
       policies: {
         lockTimeoutMs: options.lockTimeoutMs || DEFAULT_LOCK_TIMEOUT_MS,
         maxFailedAttempts: options.maxFailedAttempts || MAX_FAILED_ATTEMPTS,
@@ -370,6 +371,80 @@ const VaultEngine = (() => {
     return true;
   }
 
+  // --- Credential Management ---
+
+  /**
+   * Store an encrypted credential (domain/username/password).
+   * @param {object} cred - {domain: string, username: string, password: string}
+   * @returns {Promise<string>} The generated credential entry ID.
+   */
+  async function addCredential(cred) {
+    _requireUnlocked();
+    if (!cred.domain || !cred.username || !cred.password) {
+      throw new Error('domain, username, and password are required');
+    }
+
+    // Ensure credentials array exists (migration for vaults created before this feature)
+    if (!_vaultData.credentials) {
+      _vaultData.credentials = [];
+    }
+
+    const id = CryptoEngine.base64UrlEncode(CryptoEngine.getRandomBytes(16));
+    const encryptedPassword = await CryptoEngine.encryptString(_vaultKey, cred.password);
+
+    _vaultData.credentials.push({
+      id,
+      domain: cred.domain,
+      username: cred.username,
+      encryptedPassword,
+      createdAt: Date.now()
+    });
+
+    await _persistVault();
+    return id;
+  }
+
+  /**
+   * Get all credentials (passwords remain encrypted).
+   * @returns {Array<object>}
+   */
+  function getCredentials() {
+    _requireUnlocked();
+    return (_vaultData.credentials || []).map(c => ({
+      id: c.id,
+      domain: c.domain,
+      username: c.username,
+      createdAt: c.createdAt
+    }));
+  }
+
+  /**
+   * Decrypt and return the password for a credential.
+   * @param {string} id - Credential entry ID.
+   * @returns {Promise<string>}
+   */
+  async function getDecryptedPassword(id) {
+    _requireUnlocked();
+    const entry = (_vaultData.credentials || []).find(c => c.id === id);
+    if (!entry) throw new Error('Credential not found');
+    return CryptoEngine.decryptString(_vaultKey, entry.encryptedPassword);
+  }
+
+  /**
+   * Delete a credential from the vault.
+   * @param {string} id - Credential entry ID.
+   * @returns {Promise<boolean>}
+   */
+  async function deleteCredential(id) {
+    _requireUnlocked();
+    if (!_vaultData.credentials) return false;
+    const index = _vaultData.credentials.findIndex(c => c.id === id);
+    if (index < 0) return false;
+    _vaultData.credentials.splice(index, 1);
+    await _persistVault();
+    return true;
+  }
+
   // --- Policies ---
 
   /**
@@ -403,6 +478,7 @@ const VaultEngine = (() => {
       version: _vaultData.version,
       userCount: _vaultData.users.length,
       passkeyCount: _vaultData.passkeys.length,
+      credentialCount: (_vaultData.credentials || []).length,
       passkeys: _vaultData.passkeys.map(p => ({
         credentialId: p.credentialId,
         rpId: p.rpId,
@@ -491,6 +567,11 @@ const VaultEngine = (() => {
     getDecryptedPrivateKey,
     incrementSignCount,
     deletePasskey,
+
+    addCredential,
+    getCredentials,
+    getDecryptedPassword,
+    deleteCredential,
 
     getPolicies,
     updatePolicies,

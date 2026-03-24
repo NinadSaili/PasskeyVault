@@ -62,7 +62,7 @@
 
     <!-- Passkeys List -->
     <div class="section-header">
-      <h2>Stored Passkeys</h2>
+      <h3>Stored Passkeys</h3>
       <button id="showRegisterBtn" class="btn btn-primary btn-small">+ Register</button>
     </div>
 
@@ -90,16 +90,45 @@
       No passkeys stored yet. Register one to get started.
     </div>
 
+    <hr class="section-divider">
+
+    <!-- Credentials -->
+    <div class="section-header">
+      <h3>Stored Credentials</h3>
+      <button id="toggleCredentialForm" class="btn btn-primary btn-small">+ Add</button>
+    </div>
+
+    <div id="credentialForm" class="credential-form" style="display:none;">
+      <div class="form-group">
+        <label for="credDomain">Domain</label>
+        <input type="text" id="credDomain" placeholder="e.g. contoso.com">
+      </div>
+      <div class="form-group">
+        <label for="credUsername">Username</label>
+        <input type="text" id="credUsername" placeholder="e.g. user@contoso.com">
+      </div>
+      <div class="form-group">
+        <label for="credPassword">Password</label>
+        <input type="password" id="credPassword" placeholder="Enter password">
+      </div>
+      <div class="actions-bar">
+        <button id="cancelCredential" class="btn btn-secondary btn-small">Cancel</button>
+        <button id="saveCredential" class="btn btn-primary btn-small">Save</button>
+      </div>
+    </div>
+
+    <div id="credentialList" class="credential-list"></div>
+    <div id="credentialEmptyState" class="empty-state" style="display:none;">
+      No credentials stored yet.
+    </div>
+
+    <hr class="section-divider">
+
     <!-- Actions -->
     <div class="actions-bar">
-      <button id="lockBtn" class="btn btn-secondary">Lock Vault</button>
-      <button id="destroyBtn" class="btn btn-danger">Reset Vault</button>
+      <button id="lockVault" class="btn btn-secondary">Lock Vault</button>
+      <button id="resetVault" class="btn btn-danger">Reset Vault</button>
     </div>
-  </div>
-
-  <!-- Footer -->
-  <div class="footer">
-    <span class="version">PasskeyVault v1.0.0</span>
   </div>
 
   <script src="popup.js"></script>

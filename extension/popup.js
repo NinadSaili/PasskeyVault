@@ -1,7 +1,7 @@
 /**
  * Popup UI Controller - PasskeyVault management interface.
  *
- * Handles vault creation, unlock, passkey registration, and management.
+ * Handles vault creation, unlock, passkey registration, credential management.
  * Communicates with the background service worker via chrome.runtime messages.
  */
 
@@ -34,8 +34,19 @@
     regRpId: document.getElementById('regRpId'),
     cancelRegisterBtn: document.getElementById('cancelRegisterBtn'),
     registerBtn: document.getElementById('registerBtn'),
-    lockBtn: document.getElementById('lockBtn'),
-    destroyBtn: document.getElementById('destroyBtn')
+    // Credentials
+    toggleCredentialForm: document.getElementById('toggleCredentialForm'),
+    credentialForm: document.getElementById('credentialForm'),
+    credDomain: document.getElementById('credDomain'),
+    credUsername: document.getElementById('credUsername'),
+    credPassword: document.getElementById('credPassword'),
+    saveCredential: document.getElementById('saveCredential'),
+    cancelCredential: document.getElementById('cancelCredential'),
+    credentialList: document.getElementById('credentialList'),
+    credentialEmptyState: document.getElementById('credentialEmptyState'),
+    // Actions
+    lockVault: document.getElementById('lockVault'),
+    resetVault: document.getElementById('resetVault')
   };
 
   // --- Initialization ---
@@ -65,12 +76,19 @@
       if (e.key === 'Enter') handleUnlock();
     });
 
-    // Dashboard
+    // Dashboard - Passkeys
     el.showRegisterBtn.addEventListener('click', toggleRegisterForm);
     el.cancelRegisterBtn.addEventListener('click', toggleRegisterForm);
     el.registerBtn.addEventListener('click', handleRegisterPasskey);
-    el.lockBtn.addEventListener('click', handleLock);
-    el.destroyBtn.addEventListener('click', handleDestroy);
+
+    // Dashboard - Credentials
+    el.toggleCredentialForm.addEventListener('click', toggleCredForm);
+    el.cancelCredential.addEventListener('click', toggleCredForm);
+    el.saveCredential.addEventListener('click', handleSaveCredential);
+
+    // Dashboard - Actions
+    el.lockVault.addEventListener('click', handleLock);
+    el.resetVault.addEventListener('click', handleDestroy);
   }
 
   // --- View Management ---
@@ -219,6 +237,8 @@
     } catch {
       showStatus('error', 'Failed to load vault data');
     }
+
+    await refreshCredentials();
   }
 
   function renderPasskeyList(passkeys) {
@@ -328,6 +348,122 @@
       if (deleted) {
         showStatus('success', 'Passkey deleted');
         await refreshDashboard();
+      }
+    } catch (err) {
+      showStatus('error', err.message);
+    }
+  }
+
+  // --- Credential Management ---
+
+  function toggleCredForm() {
+    const isVisible = el.credentialForm.style.display !== 'none';
+    el.credentialForm.style.display = isVisible ? 'none' : 'block';
+    if (!isVisible) el.credDomain.focus();
+  }
+
+  async function handleSaveCredential() {
+    const domain = el.credDomain.value.trim();
+    const username = el.credUsername.value.trim();
+    const password = el.credPassword.value;
+
+    if (!domain || !username || !password) {
+      showStatus('error', 'Domain, username, and password are required');
+      return;
+    }
+
+    el.saveCredential.disabled = true;
+    try {
+      const { id, error } = await sendMessage('credential.add', { domain, username, password });
+      if (error) {
+        showStatus('error', error);
+        return;
+      }
+      showStatus('success', 'Credential saved');
+      el.credentialForm.style.display = 'none';
+      el.credDomain.value = '';
+      el.credUsername.value = '';
+      el.credPassword.value = '';
+      await refreshCredentials();
+    } catch (err) {
+      showStatus('error', err.message);
+    } finally {
+      el.saveCredential.disabled = false;
+    }
+  }
+
+  async function refreshCredentials() {
+    try {
+      const { credentials, error } = await sendMessage('credential.list');
+      if (error) return;
+      renderCredentialList(credentials || []);
+    } catch {
+      // Silently fail - credentials may not be supported on older vaults until re-saved
+    }
+  }
+
+  function renderCredentialList(credentials) {
+    el.credentialList.innerHTML = '';
+
+    if (!credentials || credentials.length === 0) {
+      el.credentialEmptyState.style.display = 'block';
+      return;
+    }
+
+    el.credentialEmptyState.style.display = 'none';
+
+    for (const cred of credentials) {
+      const item = document.createElement('div');
+      item.className = 'credential-item';
+
+      item.innerHTML = `
+        <div class="credential-icon">&#128274;</div>
+        <div class="credential-details">
+          <div class="credential-domain">${escapeHtml(cred.domain)}</div>
+          <div class="credential-user">${escapeHtml(cred.username)}</div>
+        </div>
+        <div class="credential-actions">
+          <button class="copy-btn" title="Copy password">&#128203;</button>
+          <button class="delete-btn" title="Delete credential">&#10005;</button>
+        </div>
+      `;
+
+      const copyBtn = item.querySelector('.copy-btn');
+      copyBtn.addEventListener('click', () => handleCopyPassword(cred.id));
+
+      const deleteBtn = item.querySelector('.delete-btn');
+      deleteBtn.addEventListener('click', () => handleDeleteCredential(cred.id));
+
+      el.credentialList.appendChild(item);
+    }
+  }
+
+  async function handleCopyPassword(id) {
+    try {
+      const { password, error } = await sendMessage('credential.getPassword', { id });
+      if (error) {
+        showStatus('error', error);
+        return;
+      }
+      await navigator.clipboard.writeText(password);
+      showStatus('success', 'Password copied to clipboard');
+    } catch (err) {
+      showStatus('error', err.message);
+    }
+  }
+
+  async function handleDeleteCredential(id) {
+    if (!confirm('Delete this credential? This cannot be undone.')) return;
+
+    try {
+      const { deleted, error } = await sendMessage('credential.delete', { id });
+      if (error) {
+        showStatus('error', error);
+        return;
+      }
+      if (deleted) {
+        showStatus('success', 'Credential deleted');
+        await refreshCredentials();
       }
     } catch (err) {
       showStatus('error', err.message);

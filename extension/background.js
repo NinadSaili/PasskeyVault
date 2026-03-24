@@ -184,6 +184,19 @@ async function _handleMessage(message, sender) {
     case 'passkey.delete':
       return { deleted: await VaultEngine.deletePasskey(payload.credentialId) };
 
+    // --- Credential Operations ---
+    case 'credential.add':
+      return { id: await VaultEngine.addCredential(payload) };
+
+    case 'credential.list':
+      return { credentials: VaultEngine.getCredentials() };
+
+    case 'credential.getPassword':
+      return { password: await VaultEngine.getDecryptedPassword(payload.id) };
+
+    case 'credential.delete':
+      return { deleted: await VaultEngine.deleteCredential(payload.id) };
+
     // --- Authentication Operations ---
     case 'auth.sign': {
       const assertion = await AuthEngine.signChallenge({
