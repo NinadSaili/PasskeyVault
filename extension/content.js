@@ -59,26 +59,52 @@
   }
 
   /* ------------------------------------------------ */
+  /* SIMULATE REAL USER INPUT (React/Angular compat)  */
+  /* ------------------------------------------------ */
+  function simulateInput(element, value) {
+    // React tracks values via its own internal fiber; setting .value alone
+    // won't trigger onChange handlers. We need to use the native setter
+    // and dispatch the full event sequence browsers fire on real input.
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set;
+    nativeInputValueSetter.call(element, value);
+
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  /* ------------------------------------------------ */
   /* USERNAME STAGE                                   */
   /* ------------------------------------------------ */
   async function attemptUsernameFill() {
+    if (isProcessing) return;
     try {
-      const credential = await sendToBackground('vault.getCredential', {
+      // Use getLoginHint which checks credentials first, then passkey users
+      const hint = await sendToBackground('vault.getLoginHint', {
         domain: window.location.hostname
       });
-      if (!credential) return;
+      if (!hint || !hint.username) return;
 
       const usernameField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.usernameInput);
-      if (!usernameField) return;
+      if (!usernameField || usernameField.value) return; // Don't overwrite existing input
 
-      usernameField.value = credential.username;
+      isProcessing = true;
+      simulateInput(usernameField, hint.username);
+      usernameField.focus();
 
       const next = document.querySelector(MICROSOFT_LOGIN_SELECTORS.nextButton);
       if (next && !hasSubmitted) {
         hasSubmitted = true;
-        setTimeout(() => next.click(), 600);
+        setTimeout(() => {
+          next.click();
+          isProcessing = false;
+        }, 800);
+      } else {
+        isProcessing = false;
       }
     } catch {
+      isProcessing = false;
       // Vault may be locked; silently fail
     }
   }
@@ -98,13 +124,19 @@
       if (!passwordField) return;
 
       isProcessing = true;
-      passwordField.value = credential.password;
+      simulateInput(passwordField, credential.password);
+      passwordField.focus();
 
       const submit = document.querySelector(MICROSOFT_LOGIN_SELECTORS.nextButton) ||
                      document.querySelector(MICROSOFT_LOGIN_SELECTORS.submitButton);
       if (submit && !hasSubmitted) {
         hasSubmitted = true;
-        setTimeout(() => submit.click(), 700);
+        setTimeout(() => {
+          submit.click();
+          isProcessing = false;
+        }, 800);
+      } else {
+        isProcessing = false;
       }
     } catch {
       isProcessing = false;

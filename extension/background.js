@@ -208,6 +208,39 @@ async function _handleMessage(message, sender) {
       }
       return await VaultEngine.getCredential(payload.domain);
 
+    case 'vault.getLoginHint': {
+      // Return a username for auto-fill by checking credentials first, then passkey users
+      if (!VaultEngine.isUnlocked()) return null;
+
+      // Try credential store first
+      const cred = await VaultEngine.getCredential(payload.domain);
+      if (cred) return { username: cred.username, source: 'credential' };
+
+      // Fall back to passkey user data — match by RP ID patterns for Microsoft
+      const microsoftRpIds = ['login.microsoft.com', 'login.microsoftonline.com'];
+      const hostname = (payload.domain || '').toLowerCase();
+      const isMicrosoft = microsoftRpIds.some(rp =>
+        hostname === rp || hostname.endsWith('.' + rp) ||
+        hostname.includes('microsoftonline') || hostname.includes('microsoft.com')
+      );
+
+      if (isMicrosoft) {
+        for (const rpId of microsoftRpIds) {
+          const passkeys = VaultEngine.getPasskeysByRpId(rpId);
+          if (passkeys.length > 0) {
+            const userId = passkeys[0].userId;
+            const users = VaultEngine.getUsers();
+            const user = users.find(u => u.userId === userId);
+            if (user && user.entraUpn) {
+              return { username: user.entraUpn, source: 'passkey' };
+            }
+          }
+        }
+      }
+
+      return null;
+    }
+
     // --- ID-based Credential Operations (used by popup) ---
     case 'credential.add':
       return { id: await VaultEngine.addCredential(payload) };
