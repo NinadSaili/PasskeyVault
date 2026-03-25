@@ -79,15 +79,16 @@
       isProcessing
     });
 
-    // Account picker page ("Pick an account")
-    if (accountTiles.length > 0 && !hasFilledUsername) {
-      attemptAccountPickerSelect(accountTiles);
+    // Username input page ("Sign in") — prioritize this over account tiles
+    // because some pages show both tiles AND the input field
+    if (usernameField && !passwordField && !hasFilledUsername) {
+      attemptUsernameFill();
       return;
     }
 
-    // Username input page ("Sign in")
-    if (usernameField && !passwordField && !hasFilledUsername) {
-      attemptUsernameFill();
+    // Account picker page ("Pick an account" — tiles only, no input field)
+    if (accountTiles.length > 0 && !hasFilledUsername && !usernameField) {
+      attemptAccountPickerSelect(accountTiles);
       return;
     }
 
