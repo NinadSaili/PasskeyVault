@@ -1,22 +1,14 @@
 /**
  * Content Script - PasskeyVault page-level authentication orchestrator.
- *
- * Injected into Microsoft login pages. Responsibilities:
- *   - Detect WebAuthn credential requests on the page.
- *   - Intercept navigator.credentials.get() calls.
- *   - Communicate with background service worker for signing.
- *   - Inject signed assertions back into the page flow.
- *   - Detect passkey/FIDO2 UI prompts on Microsoft login pages.
+ * Production version with Microsoft login stage detection.
  */
-
 'use strict';
-
 (() => {
-  // Prevent double-injection
   if (window.__passkeyVaultInjected) return;
   window.__passkeyVaultInjected = true;
 
-  // --- Configuration ---
+  let hasSubmitted = false;
+  let isProcessing = false;
 
   const MICROSOFT_LOGIN_SELECTORS = {
     usernameInput: 'input[name="loginfmt"]',
@@ -29,79 +21,148 @@
     errorMessage: '#passwordError, #usernameError, .alert-error'
   };
 
-  // --- State ---
-
-  let currentPageAnalysis = null;
-  let isProcessing = false;
-
-  // --- Initialization ---
-
   init();
 
   function init() {
-    analyzeCurrentPage();
-    observeDomChanges();
     interceptWebAuthnApi();
-    listenForBackgroundMessages();
+    observeDomChanges();
+    detectLoginStage();
   }
 
-  // --- Page Analysis ---
+  /* ------------------------------------------------ */
+  /* LOGIN STAGE DETECTION                            */
+  /* ------------------------------------------------ */
+  function detectLoginStage() {
+    const usernameField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.usernameInput);
+    const passwordField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passwordInput);
+    const otherWay = document.querySelector('#signInAnotherWay');
+    const passwordOption = document.querySelector('[data-value="Password"]');
 
-  function analyzeCurrentPage() {
-    const signals = {
-      pageUrl: window.location.href,
-      hasWebAuthnApi: !!(navigator.credentials && navigator.credentials.get),
-      hasPasskeyPrompt: !!document.querySelector(MICROSOFT_LOGIN_SELECTORS.fidoLink)
-        || !!document.querySelector(MICROSOFT_LOGIN_SELECTORS.passkeyOption),
-      hasUsernameField: !!document.querySelector(MICROSOFT_LOGIN_SELECTORS.usernameInput),
-      hasPasswordField: !!document.querySelector(MICROSOFT_LOGIN_SELECTORS.passwordInput)
-    };
+    if (usernameField && !passwordField) {
+      attemptUsernameFill();
+    }
 
-    sendToBackground('federation.analyze', signals).then((response) => {
-      if (response && response.analysis) {
-        currentPageAnalysis = response.analysis;
+    if (passwordField) {
+      attemptPasswordFill();
+    }
 
-        if (currentPageAnalysis.shouldIntercept) {
-          handleAuthInterception();
-        }
+    if (otherWay && !hasSubmitted) {
+      hasSubmitted = true;
+      setTimeout(() => otherWay.click(), 400);
+      return;
+    }
+
+    if (passwordOption && !hasSubmitted) {
+      hasSubmitted = true;
+      setTimeout(() => passwordOption.click(), 400);
+    }
+  }
+
+  /* ------------------------------------------------ */
+  /* USERNAME STAGE                                   */
+  /* ------------------------------------------------ */
+  async function attemptUsernameFill() {
+    try {
+      const credential = await sendToBackground('vault.getCredential', {
+        domain: window.location.hostname
+      });
+      if (!credential) return;
+
+      const usernameField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.usernameInput);
+      if (!usernameField) return;
+
+      usernameField.value = credential.username;
+
+      const next = document.querySelector(MICROSOFT_LOGIN_SELECTORS.nextButton);
+      if (next && !hasSubmitted) {
+        hasSubmitted = true;
+        setTimeout(() => next.click(), 600);
       }
-    });
+    } catch {
+      // Vault may be locked; silently fail
+    }
   }
 
-  // --- DOM Mutation Observer ---
+  /* ------------------------------------------------ */
+  /* PASSWORD STAGE                                   */
+  /* ------------------------------------------------ */
+  async function attemptPasswordFill() {
+    if (isProcessing) return;
+    try {
+      const credential = await sendToBackground('vault.getCredential', {
+        domain: window.location.hostname
+      });
+      if (!credential) return;
 
+      const passwordField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passwordInput);
+      if (!passwordField) return;
+
+      isProcessing = true;
+      passwordField.value = credential.password;
+
+      const submit = document.querySelector(MICROSOFT_LOGIN_SELECTORS.nextButton) ||
+                     document.querySelector(MICROSOFT_LOGIN_SELECTORS.submitButton);
+      if (submit && !hasSubmitted) {
+        hasSubmitted = true;
+        setTimeout(() => submit.click(), 700);
+      }
+    } catch {
+      isProcessing = false;
+    }
+  }
+
+  /* ------------------------------------------------ */
+  /* DOM OBSERVER (THROTTLED)                         */
+  /* ------------------------------------------------ */
+  let observerTimeout;
   function observeDomChanges() {
-    const observer = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-          // Re-check for passkey prompts when DOM changes
-          const fidoLink = document.querySelector(MICROSOFT_LOGIN_SELECTORS.fidoLink);
-          const passkeyOption = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passkeyOption);
-
-          if (fidoLink || passkeyOption) {
-            if (!isProcessing) {
-              handlePasskeyPromptDetected();
-            }
-          }
-        }
-      }
+    const observer = new MutationObserver(() => {
+      clearTimeout(observerTimeout);
+      observerTimeout = setTimeout(() => {
+        detectLoginStage();
+        detectPasskeyPrompt();
+      }, 300);
     });
-
-    observer.observe(document.body || document.documentElement, {
+    observer.observe(document.documentElement, {
       childList: true,
       subtree: true
     });
   }
 
-  // --- WebAuthn API Interception ---
+  /* ------------------------------------------------ */
+  /* PASSKEY PROMPT HANDLING                          */
+  /* ------------------------------------------------ */
+  function detectPasskeyPrompt() {
+    const fidoLink = document.querySelector(MICROSOFT_LOGIN_SELECTORS.fidoLink);
+    const passkeyOption = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passkeyOption);
+    if (fidoLink || passkeyOption) {
+      handlePasskeyPromptDetected();
+    }
+  }
 
+  function handlePasskeyPromptDetected() {
+    if (isProcessing) return;
+    sendToBackground('auth.getAvailable', {
+      rpId: window.location.hostname
+    }).then((response) => {
+      if (response.passkeys && response.passkeys.length > 0) {
+        const fidoLink = document.querySelector(MICROSOFT_LOGIN_SELECTORS.fidoLink);
+        const passkeyOption = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passkeyOption);
+        const target = fidoLink || passkeyOption;
+        if (target) target.click();
+      }
+    });
+  }
+
+  /* ------------------------------------------------ */
+  /* WEBAUTHN INTERCEPTION                            */
+  /* ------------------------------------------------ */
   function interceptWebAuthnApi() {
     if (!navigator.credentials) return;
 
     const originalGet = navigator.credentials.get.bind(navigator.credentials);
 
-    navigator.credentials.get = async function (options) {
-      // Only intercept WebAuthn / publicKey requests
+    navigator.credentials.get = async function(options) {
       if (!options || !options.publicKey) {
         return originalGet(options);
       }
@@ -109,170 +170,78 @@
       const publicKeyOptions = options.publicKey;
       const rpId = publicKeyOptions.rpId || window.location.hostname;
 
-      // Check if this is a Microsoft auth domain we should handle
       const originCheck = await sendToBackground('security.validateOrigin', {
         origin: window.location.origin
       });
-
       if (!originCheck || !originCheck.valid) {
-        // Not a trusted domain, fall through to platform authenticator
         return originalGet(options);
       }
 
-      // Extract challenge
-      const challenge = publicKeyOptions.challenge;
-      const challengeB64 = arrayBufferToBase64Url(challenge);
-
-      // Extract allowed credentials
-      const allowCredentials = (publicKeyOptions.allowCredentials || []).map(cred => ({
-        id: arrayBufferToBase64Url(cred.id),
-        type: cred.type
+      const challengeB64 = arrayBufferToBase64Url(publicKeyOptions.challenge);
+      const allowCredentials = (publicKeyOptions.allowCredentials || []).map(c => ({
+        id: arrayBufferToBase64Url(c.id),
+        type: c.type
       }));
 
-      // Ask background for a signed assertion
       try {
         const response = await sendToBackground('content.webauthnDetected', {
           rpId,
           challenge: challengeB64,
           origin: window.location.origin,
-          allowCredentials,
-          userVerification: publicKeyOptions.userVerification
+          allowCredentials
         });
 
-        if (response.action === 'signedAssertion' && response.assertion) {
-          // Convert the assertion back to the format expected by the page
+        if (response.action === 'signedAssertion') {
           return buildCredentialResponse(response.assertion);
         }
 
         if (response.action === 'requestUnlock') {
-          // Vault is locked; show notification and fall through
-          showNotification('PasskeyVault is locked. Click the extension icon to unlock.');
-          return originalGet(options);
+          showNotification('PasskeyVault locked');
         }
 
-        if (response.action === 'noPasskeys') {
-          // No matching passkeys; fall through to platform
-          return originalGet(options);
-        }
-
-        if (response.action === 'selectPasskey') {
-          // Multiple passkeys available - for now auto-select first
-          // Future: show selection UI
-          const selected = response.passkeys[0];
-          const signResponse = await sendToBackground('auth.sign', {
-            credentialId: selected.credentialId,
-            rpId,
-            challenge: challengeB64,
-            origin: window.location.origin
-          });
-          if (signResponse.assertion) {
-            return buildCredentialResponse(signResponse.assertion);
-          }
-        }
-
-        // Fallback to platform authenticator
         return originalGet(options);
       } catch {
-        // On any error, fall back to the platform authenticator
         return originalGet(options);
       }
     };
   }
 
-  // --- Passkey Prompt Auto-Click ---
-
-  function handlePasskeyPromptDetected() {
-    if (isProcessing) return;
-    isProcessing = true;
-
-    // Check if vault is unlocked and has passkeys for this RP
-    sendToBackground('auth.getAvailable', {
-      rpId: window.location.hostname
-    }).then((response) => {
-      if (response.passkeys && response.passkeys.length > 0) {
-        // Auto-click the FIDO/passkey option to trigger the WebAuthn flow
-        const fidoLink = document.querySelector(MICROSOFT_LOGIN_SELECTORS.fidoLink);
-        const passkeyOption = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passkeyOption);
-        const target = fidoLink || passkeyOption;
-
-        if (target) {
-          target.click();
-        }
-      }
-      isProcessing = false;
-    }).catch(() => {
-      isProcessing = false;
-    });
-  }
-
-  function handleAuthInterception() {
-    // When we detect this is an auth page, check if we can auto-trigger passkey flow
-    sendToBackground('vault.isUnlocked', {}).then((response) => {
-      if (response.unlocked) {
-        // Look for sign-in-another-way link to navigate to passkey option
-        const otherWay = document.querySelector(MICROSOFT_LOGIN_SELECTORS.otherWayToSignIn);
-        if (otherWay) {
-          otherWay.click();
-          // The DOM observer will catch the passkey option appearing
-        }
-      }
-    });
-  }
-
-  // --- Build WebAuthn Credential Response ---
-
+  /* ------------------------------------------------ */
+  /* BUILD WEBAUTHN RESPONSE                          */
+  /* ------------------------------------------------ */
   function buildCredentialResponse(assertion) {
-    // Construct a PublicKeyCredential-like object
-    const response = {
+    return {
       id: assertion.credentialId,
       rawId: base64UrlToArrayBuffer(assertion.credentialId),
-      type: assertion.type,
+      type: 'public-key',
       response: {
         authenticatorData: base64UrlToArrayBuffer(assertion.authenticatorData),
         clientDataJSON: base64UrlToArrayBuffer(assertion.clientDataJSON),
         signature: base64UrlToArrayBuffer(assertion.signature),
-        userHandle: assertion.userHandle
-          ? base64UrlToArrayBuffer(assertion.userHandle)
-          : null
+        userHandle: null
       },
-      authenticatorAttachment: 'cross-platform',
       getClientExtensionResults: () => ({})
     };
-
-    return response;
   }
 
-  // --- Background Communication ---
-
+  /* ------------------------------------------------ */
+  /* BACKGROUND MESSAGING                             */
+  /* ------------------------------------------------ */
   function sendToBackground(action, payload) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ action, payload }, (response) => {
         if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+          reject(chrome.runtime.lastError);
           return;
         }
-        resolve(response || {});
+        resolve(response);
       });
     });
   }
 
-  function listenForBackgroundMessages() {
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (message.type === 'AUTH_FLOW_DETECTED') {
-        currentPageAnalysis = message.flow;
-      }
-      if (message.type === 'AUTH_PAGE_LOADED') {
-        analyzeCurrentPage();
-      }
-      if (message.type === 'FEDERATION_EVENT') {
-        // Track federation events for debugging
-      }
-      sendResponse({ received: true });
-    });
-  }
-
-  // --- UI Notifications ---
-
+  /* ------------------------------------------------ */
+  /* UI NOTIFICATION                                  */
+  /* ------------------------------------------------ */
   function showNotification(text) {
     const banner = document.createElement('div');
     banner.textContent = text;
@@ -280,28 +249,19 @@
       position: 'fixed',
       top: '10px',
       right: '10px',
-      padding: '12px 20px',
-      backgroundColor: '#0078d4',
-      color: '#ffffff',
+      padding: '10px 16px',
+      background: '#0078d4',
+      color: '#fff',
       borderRadius: '6px',
-      zIndex: '999999',
-      fontSize: '14px',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-      boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-      cursor: 'pointer',
-      transition: 'opacity 0.3s'
+      zIndex: '999999'
     });
-    banner.addEventListener('click', () => banner.remove());
     document.body.appendChild(banner);
-
-    setTimeout(() => {
-      banner.style.opacity = '0';
-      setTimeout(() => banner.remove(), 300);
-    }, 5000);
+    setTimeout(() => banner.remove(), 4000);
   }
 
-  // --- Encoding Utilities ---
-
+  /* ------------------------------------------------ */
+  /* UTILS                                            */
+  /* ------------------------------------------------ */
   function arrayBufferToBase64Url(buffer) {
     const bytes = new Uint8Array(buffer);
     let binary = '';
@@ -313,7 +273,7 @@
 
   function base64UrlToArrayBuffer(base64url) {
     let base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
-    while (base64.length % 4 !== 0) base64 += '=';
+    while (base64.length % 4) base64 += '=';
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {

@@ -185,6 +185,28 @@ async function _handleMessage(message, sender) {
       return { deleted: await VaultEngine.deletePasskey(payload.credentialId) };
 
     // --- Credential Operations ---
+    // --- Domain-based Credential Operations (used by content scripts) ---
+    case 'vault.storeCredential':
+      await VaultEngine.storeCredential(
+        payload.domain,
+        payload.username,
+        payload.password
+      );
+      return { success: true };
+
+    case 'vault.getAllCredentials':
+      if (!VaultEngine.isUnlocked()) {
+        return { credentials: [] };
+      }
+      return { credentials: VaultEngine.getAllCredentials() };
+
+    case 'vault.getCredential':
+      if (!VaultEngine.isUnlocked()) {
+        return null;
+      }
+      return await VaultEngine.getCredential(payload.domain);
+
+    // --- ID-based Credential Operations (used by popup) ---
     case 'credential.add':
       return { id: await VaultEngine.addCredential(payload) };
 

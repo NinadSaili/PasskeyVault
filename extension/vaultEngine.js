@@ -445,6 +445,88 @@ const VaultEngine = (() => {
     return true;
   }
 
+  // --- Domain-based Credential Access (used by content scripts) ---
+
+  /**
+   * Store or update a credential by domain.
+   * If a credential for the domain already exists, it is updated.
+   * @param {string} domain - Site domain.
+   * @param {string} username - Username.
+   * @param {string} password - Plaintext password (will be encrypted).
+   * @returns {Promise<void>}
+   */
+  async function storeCredential(domain, username, password) {
+    _requireUnlocked();
+    if (!_vaultData.credentials) {
+      _vaultData.credentials = [];
+    }
+
+    const encryptedPassword = await CryptoEngine.encryptString(_vaultKey, password);
+    const existing = _vaultData.credentials.find(c => c.domain === domain);
+
+    if (existing) {
+      existing.username = username;
+      existing.encryptedPassword = encryptedPassword;
+    } else {
+      const id = CryptoEngine.base64UrlEncode(CryptoEngine.getRandomBytes(16));
+      _vaultData.credentials.push({
+        id,
+        domain,
+        username,
+        encryptedPassword,
+        createdAt: Date.now()
+      });
+    }
+    await _persistVault();
+  }
+
+  /**
+   * Get all credentials (domain + username only, no passwords).
+   * @returns {Array<{domain: string, username: string}>}
+   */
+  function getAllCredentials() {
+    _requireUnlocked();
+    return (_vaultData.credentials || []).map(c => ({
+      domain: c.domain,
+      username: c.username
+    }));
+  }
+
+  /**
+   * Find a credential by fuzzy domain match and return it with decrypted password.
+   * Used by content scripts to auto-fill login forms.
+   * @param {string} domain - The hostname to match against.
+   * @returns {Promise<{username: string, password: string}|null>}
+   */
+  async function getCredential(domain) {
+    _requireUnlocked();
+    if (!_vaultData.credentials || _vaultData.credentials.length === 0) {
+      return null;
+    }
+
+    function normalizeDomain(d) {
+      return (d || '')
+        .toLowerCase()
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .split('/')[0];
+    }
+
+    const normalizedInput = normalizeDomain(domain);
+    const cred = _vaultData.credentials.find(c => {
+      const stored = normalizeDomain(c.domain);
+      return (
+        normalizedInput === stored ||
+        normalizedInput.endsWith(stored) ||
+        stored.endsWith(normalizedInput)
+      );
+    });
+
+    if (!cred) return null;
+    const password = await CryptoEngine.decryptString(_vaultKey, cred.encryptedPassword);
+    return { username: cred.username, password };
+  }
+
   // --- Policies ---
 
   /**
@@ -572,6 +654,10 @@ const VaultEngine = (() => {
     getCredentials,
     getDecryptedPassword,
     deleteCredential,
+
+    storeCredential,
+    getAllCredentials,
+    getCredential,
 
     getPolicies,
     updatePolicies,
