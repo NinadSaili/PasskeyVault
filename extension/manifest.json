@@ -43,5 +43,6 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "minimum_chrome_version": "116"
+  "minimum_chrome_version": "116",
+  "incognito": "spanning"
 }

@@ -7,10 +7,16 @@
   if (window.__passkeyVaultInjected) return;
   window.__passkeyVaultInjected = true;
 
-  let hasSubmitted = false;
+  const DEBUG = true;
+  function log(...args) {
+    if (DEBUG) console.log('[PasskeyVault]', ...args);
+  }
+
+  let hasFilledUsername = false;
+  let hasFilledPassword = false;
   let isProcessing = false;
 
-  const MICROSOFT_LOGIN_SELECTORS = {
+  const SELECTORS = {
     usernameInput: 'input[name="loginfmt"]',
     passwordInput: 'input[name="passwd"]',
     submitButton: 'input[type="submit"], button[type="submit"]',
@@ -18,84 +24,176 @@
     fidoLink: '#fidoLink, a[data-value="FidoCredential"]',
     passkeyOption: '[data-value="Fido2"], [data-value="FidoCredential"]',
     otherWayToSignIn: '#signInAnotherWay',
-    errorMessage: '#passwordError, #usernameError, .alert-error'
+    errorMessage: '#passwordError, #usernameError, .alert-error',
+    // Account picker page selectors
+    accountTile: '.table[role="option"], .tile-container .table, [data-test-id="accountTile"]',
+    useAnotherAccount: '#otherTile, #otherTileText, [data-test-id="otherTile"]'
   };
 
   init();
 
   function init() {
+    log('Content script loaded on', window.location.hostname, window.location.pathname);
     interceptWebAuthnApi();
     observeDomChanges();
-    detectLoginStage();
-  }
-
-  /* ------------------------------------------------ */
-  /* LOGIN STAGE DETECTION                            */
-  /* ------------------------------------------------ */
-  function detectLoginStage() {
-    const usernameField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.usernameInput);
-    const passwordField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passwordInput);
-    const otherWay = document.querySelector('#signInAnotherWay');
-    const passwordOption = document.querySelector('[data-value="Password"]');
-
-    if (usernameField && !passwordField) {
-      attemptUsernameFill();
-    }
-
-    if (passwordField) {
-      attemptPasswordFill();
-    }
-
-    if (otherWay && !hasSubmitted) {
-      hasSubmitted = true;
-      setTimeout(() => otherWay.click(), 400);
-      return;
-    }
-
-    if (passwordOption && !hasSubmitted) {
-      hasSubmitted = true;
-      setTimeout(() => passwordOption.click(), 400);
-    }
+    // Give page time to render dynamic content, then detect
+    setTimeout(() => detectLoginStage(), 500);
+    setTimeout(() => detectLoginStage(), 1500);
+    setTimeout(() => detectLoginStage(), 3000);
   }
 
   /* ------------------------------------------------ */
   /* SIMULATE REAL USER INPUT (React/Angular compat)  */
   /* ------------------------------------------------ */
   function simulateInput(element, value) {
-    // React tracks values via its own internal fiber; setting .value alone
-    // won't trigger onChange handlers. We need to use the native setter
-    // and dispatch the full event sequence browsers fire on real input.
+    element.focus();
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
     ).set;
     nativeInputValueSetter.call(element, value);
 
+    element.dispatchEvent(new Event('focus', { bubbles: true }));
     element.dispatchEvent(new Event('input', { bubbles: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
+    element.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+
+  /* ------------------------------------------------ */
+  /* LOGIN STAGE DETECTION                            */
+  /* ------------------------------------------------ */
+  function detectLoginStage() {
+    const usernameField = document.querySelector(SELECTORS.usernameInput);
+    const passwordField = document.querySelector(SELECTORS.passwordInput);
+    const accountTiles = document.querySelectorAll(SELECTORS.accountTile);
+    const otherWay = document.querySelector(SELECTORS.otherWayToSignIn);
+    const passwordOption = document.querySelector('[data-value="Password"]');
+
+    log('Stage detection:', {
+      hasUsernameField: !!usernameField,
+      hasPasswordField: !!passwordField,
+      accountTileCount: accountTiles.length,
+      hasOtherWay: !!otherWay,
+      hasPasswordOption: !!passwordOption,
+      hasFilledUsername,
+      hasFilledPassword,
+      isProcessing
+    });
+
+    // Account picker page ("Pick an account")
+    if (accountTiles.length > 0 && !hasFilledUsername) {
+      attemptAccountPickerSelect(accountTiles);
+      return;
+    }
+
+    // Username input page ("Sign in")
+    if (usernameField && !passwordField && !hasFilledUsername) {
+      attemptUsernameFill();
+      return;
+    }
+
+    // Password input page
+    if (passwordField && !hasFilledPassword) {
+      attemptPasswordFill();
+      return;
+    }
+
+    // "Sign in another way" prompt
+    if (otherWay && !hasFilledPassword) {
+      log('Clicking "Sign in another way"');
+      setTimeout(() => otherWay.click(), 400);
+      return;
+    }
+
+    // Password option in the method picker
+    if (passwordOption && !hasFilledPassword) {
+      log('Clicking "Password" option');
+      setTimeout(() => passwordOption.click(), 400);
+    }
+  }
+
+  /* ------------------------------------------------ */
+  /* ACCOUNT PICKER ("Pick an account" page)          */
+  /* ------------------------------------------------ */
+  async function attemptAccountPickerSelect(tiles) {
+    if (isProcessing) return;
+    isProcessing = true;
+    log('Account picker detected with', tiles.length, 'tiles');
+
+    try {
+      const hint = await sendToBackground('vault.getLoginHint', {
+        domain: window.location.hostname
+      });
+      if (!hint || !hint.username) {
+        log('No login hint available');
+        isProcessing = false;
+        return;
+      }
+
+      log('Looking for account tile matching:', hint.username);
+      const targetEmail = hint.username.toLowerCase();
+
+      // Search all tiles for matching email text
+      for (const tile of tiles) {
+        const tileText = (tile.textContent || '').toLowerCase();
+        if (tileText.includes(targetEmail)) {
+          log('Found matching account tile, clicking');
+          hasFilledUsername = true;
+          tile.click();
+          isProcessing = false;
+          return;
+        }
+      }
+
+      // No matching tile found — click "Use another account" if available
+      const useAnother = document.querySelector(SELECTORS.useAnotherAccount);
+      if (useAnother) {
+        log('No matching tile, clicking "Use another account"');
+        useAnother.click();
+        // After clicking, the username input page should appear
+        // The MutationObserver will re-trigger detectLoginStage
+      }
+
+      isProcessing = false;
+    } catch (err) {
+      log('Account picker error:', err);
+      isProcessing = false;
+    }
   }
 
   /* ------------------------------------------------ */
   /* USERNAME STAGE                                   */
   /* ------------------------------------------------ */
   async function attemptUsernameFill() {
-    if (isProcessing) return;
+    if (isProcessing || hasFilledUsername) return;
+    isProcessing = true;
+    log('Attempting username fill');
+
     try {
-      // Use getLoginHint which checks credentials first, then passkey users
       const hint = await sendToBackground('vault.getLoginHint', {
         domain: window.location.hostname
       });
-      if (!hint || !hint.username) return;
+      log('Login hint response:', hint);
 
-      const usernameField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.usernameInput);
-      if (!usernameField || usernameField.value) return; // Don't overwrite existing input
+      if (!hint || !hint.username) {
+        log('No login hint available');
+        isProcessing = false;
+        return;
+      }
 
-      isProcessing = true;
+      const usernameField = document.querySelector(SELECTORS.usernameInput);
+      if (!usernameField) {
+        log('Username field not found');
+        isProcessing = false;
+        return;
+      }
+
+      log('Filling username:', hint.username, '(source:', hint.source + ')');
       simulateInput(usernameField, hint.username);
-      usernameField.focus();
+      hasFilledUsername = true;
 
-      const next = document.querySelector(MICROSOFT_LOGIN_SELECTORS.nextButton);
-      if (next && !hasSubmitted) {
-        hasSubmitted = true;
+      const next = document.querySelector(SELECTORS.nextButton);
+      if (next) {
+        log('Clicking Next button in 800ms');
         setTimeout(() => {
           next.click();
           isProcessing = false;
@@ -103,9 +201,9 @@
       } else {
         isProcessing = false;
       }
-    } catch {
+    } catch (err) {
+      log('Username fill error:', err);
       isProcessing = false;
-      // Vault may be locked; silently fail
     }
   }
 
@@ -113,24 +211,35 @@
   /* PASSWORD STAGE                                   */
   /* ------------------------------------------------ */
   async function attemptPasswordFill() {
-    if (isProcessing) return;
+    if (isProcessing || hasFilledPassword) return;
+    isProcessing = true;
+    log('Attempting password fill');
+
     try {
       const credential = await sendToBackground('vault.getCredential', {
         domain: window.location.hostname
       });
-      if (!credential) return;
+      if (!credential || !credential.password) {
+        log('No credential found for password fill');
+        isProcessing = false;
+        return;
+      }
 
-      const passwordField = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passwordInput);
-      if (!passwordField) return;
+      const passwordField = document.querySelector(SELECTORS.passwordInput);
+      if (!passwordField) {
+        log('Password field not found');
+        isProcessing = false;
+        return;
+      }
 
-      isProcessing = true;
+      log('Filling password');
       simulateInput(passwordField, credential.password);
-      passwordField.focus();
+      hasFilledPassword = true;
 
-      const submit = document.querySelector(MICROSOFT_LOGIN_SELECTORS.nextButton) ||
-                     document.querySelector(MICROSOFT_LOGIN_SELECTORS.submitButton);
-      if (submit && !hasSubmitted) {
-        hasSubmitted = true;
+      const submit = document.querySelector(SELECTORS.nextButton) ||
+                     document.querySelector(SELECTORS.submitButton);
+      if (submit) {
+        log('Clicking submit in 800ms');
         setTimeout(() => {
           submit.click();
           isProcessing = false;
@@ -138,7 +247,8 @@
       } else {
         isProcessing = false;
       }
-    } catch {
+    } catch (err) {
+      log('Password fill error:', err);
       isProcessing = false;
     }
   }
@@ -165,8 +275,8 @@
   /* PASSKEY PROMPT HANDLING                          */
   /* ------------------------------------------------ */
   function detectPasskeyPrompt() {
-    const fidoLink = document.querySelector(MICROSOFT_LOGIN_SELECTORS.fidoLink);
-    const passkeyOption = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passkeyOption);
+    const fidoLink = document.querySelector(SELECTORS.fidoLink);
+    const passkeyOption = document.querySelector(SELECTORS.passkeyOption);
     if (fidoLink || passkeyOption) {
       handlePasskeyPromptDetected();
     }
@@ -178,10 +288,13 @@
       rpId: window.location.hostname
     }).then((response) => {
       if (response.passkeys && response.passkeys.length > 0) {
-        const fidoLink = document.querySelector(MICROSOFT_LOGIN_SELECTORS.fidoLink);
-        const passkeyOption = document.querySelector(MICROSOFT_LOGIN_SELECTORS.passkeyOption);
+        const fidoLink = document.querySelector(SELECTORS.fidoLink);
+        const passkeyOption = document.querySelector(SELECTORS.passkeyOption);
         const target = fidoLink || passkeyOption;
-        if (target) target.click();
+        if (target) {
+          log('Clicking passkey option');
+          target.click();
+        }
       }
     });
   }
@@ -300,9 +413,6 @@
   /* BUILD WEBAUTHN RESPONSES                         */
   /* ------------------------------------------------ */
 
-  /**
-   * Build a PublicKeyCredential response for navigator.credentials.create().
-   */
   function buildCreateResponse(registration) {
     const credentialId = registration.credentialId;
     const rawId = base64UrlToArrayBuffer(registration.credentialIdRaw || credentialId);
@@ -319,16 +429,11 @@
         clientDataJSON: clientDataJSON,
         getTransports: () => ['internal'],
         getPublicKeyAlgorithm: () => -7,
-        getAuthenticatorData: () => {
-          // Extract authData from the attestation object (first field after CBOR map header)
-          // The RP can also get this from the attestation object directly
-          return attestationObject;
-        }
+        getAuthenticatorData: () => attestationObject
       },
       getClientExtensionResults: () => ({})
     };
 
-    // Add getPublicKey if SPKI data available
     if (registration.publicKeySpki) {
       response.response.getPublicKey = () => base64UrlToArrayBuffer(registration.publicKeySpki);
     }
@@ -336,9 +441,6 @@
     return response;
   }
 
-  /**
-   * Build a PublicKeyCredential response for navigator.credentials.get().
-   */
   function buildCredentialResponse(assertion) {
     return {
       id: assertion.credentialId,
@@ -384,7 +486,9 @@
       background: '#0078d4',
       color: '#fff',
       borderRadius: '6px',
-      zIndex: '999999'
+      zIndex: '999999',
+      fontFamily: 'Segoe UI, sans-serif',
+      fontSize: '14px'
     });
     document.body.appendChild(banner);
     setTimeout(() => banner.remove(), 4000);
