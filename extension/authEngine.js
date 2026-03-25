@@ -1,34 +1,31 @@
 /**
  * AuthEngine - WebAuthn key generation and authentication challenge signing.
  *
- * Handles the full WebAuthn assertion flow:
+ * Handles the full WebAuthn flow:
  *   1. Generate P-256 key pairs for passkey registration.
- *   2. Sign WebAuthn challenges using stored passkeys.
- *   3. Produce correctly formatted WebAuthn authenticator assertions.
+ *   2. Build standards-compliant CBOR attestation objects.
+ *   3. Sign WebAuthn challenges using stored passkeys.
+ *   4. Produce correctly formatted authenticator assertions.
  *
- * Depends on: CryptoEngine, VaultEngine, SecurityValidator
+ * Depends on: CryptoEngine, VaultEngine, SecurityValidator,
+ *             CborEncoder, AttestationBuilder
  */
 const AuthEngine = (() => {
   'use strict';
 
-  // AAGUID for this authenticator (randomly generated, fixed for this extension)
-  const AAGUID = new Uint8Array([
-    0x50, 0x4b, 0x56, 0x2d, 0x45, 0x58, 0x54, 0x2d,
-    0x41, 0x55, 0x54, 0x48, 0x2d, 0x56, 0x31, 0x00
-  ]);
-
-  // Authenticator flags
-  const FLAGS = {
-    UP: 0x01,   // User Present
-    UV: 0x04,   // User Verified
-    AT: 0x40,   // Attested Credential Data
-    ED: 0x80    // Extension Data
-  };
-
   /**
    * Register a new passkey for a user and relying party.
+   * Produces a CBOR-encoded packed self-attestation object.
+   *
+   * @param {object} params
+   * @param {string} params.rpId - Relying party ID.
+   * @param {string} params.rpName - Relying party display name.
+   * @param {string} params.userId - Vault user ID.
+   * @param {string} params.userName - User display name.
+   * @param {ArrayBuffer} [params.clientDataHash] - Hash of clientDataJSON (for content script flow).
+   * @returns {Promise<object>} Registration result with attestationObject.
    */
-  async function registerPasskey({ rpId, rpName, userId, userName }) {
+  async function registerPasskey({ rpId, rpName, userId, userName, clientDataHash }) {
     if (!rpId || !userId) {
       throw new Error('rpId and userId are required for registration');
     }
@@ -36,6 +33,7 @@ const AuthEngine = (() => {
       throw new Error('Vault must be unlocked to register a passkey');
     }
 
+    // Validate RP ID
     if (typeof SecurityValidator !== 'undefined') {
       const rpValidation = SecurityValidator.validateRpId(rpId, `https://${rpId}`);
       if (!rpValidation.valid) {
@@ -43,9 +41,11 @@ const AuthEngine = (() => {
       }
     }
 
-    const { privateKey, publicKey } = await CryptoEngine.generateWebAuthnKeyPair();
+    // Generate WebAuthn-compatible P-256 key pair (keep CryptoKeyPair for attestation signing)
+    const { privateKey, publicKey, keyPair } = await CryptoEngine.generateWebAuthnKeyPair();
     const credentialId = CryptoEngine.generateCredentialId();
 
+    // Store encrypted in vault
     const storedCredId = await VaultEngine.storePasskey({
       rpId,
       rpName: rpName || rpId,
@@ -55,23 +55,124 @@ const AuthEngine = (() => {
       credentialId
     });
 
-    const cosePublicKey = await _exportCosePublicKey(publicKey);
+    // If no clientDataHash provided (popup registration), create a synthetic one
+    if (!clientDataHash) {
+      const syntheticClientData = JSON.stringify({
+        type: 'webauthn.create',
+        challenge: CryptoEngine.base64UrlEncode(CryptoEngine.getRandomBytes(32)),
+        origin: `https://${rpId}`,
+        crossOrigin: false
+      });
+      clientDataHash = await CryptoEngine.sha256(
+        new TextEncoder().encode(syntheticClientData)
+      );
+    }
+
+    // Build CBOR-encoded packed self-attestation object
+    const attestationObjectBytes = await AttestationBuilder.buildSelfAttestation({
+      rpId,
+      credentialId,
+      publicKeySpki: publicKey,
+      privateKey: keyPair.privateKey,
+      clientDataHash
+    });
+
+    // COSE public key (for RP verification)
+    const cosePublicKey = await AttestationBuilder.encodeCosePublicKey(publicKey);
 
     return {
       credentialId: storedCredId,
-      credentialIdRaw: credentialId,
+      credentialIdRaw: CryptoEngine.base64UrlEncode(credentialId),
       publicKey: CryptoEngine.arrayBufferToBase64(publicKey),
-      publicKeyCose: cosePublicKey,
+      publicKeyCose: CryptoEngine.base64UrlEncode(cosePublicKey),
+      attestationObject: CryptoEngine.base64UrlEncode(attestationObjectBytes),
       rpId,
       userId,
       type: 'public-key',
+      transports: ['internal']
+    };
+  }
+
+  /**
+   * Register a passkey via content script WebAuthn interception.
+   * Called when navigator.credentials.create() is intercepted.
+   *
+   * @param {object} params
+   * @param {string} params.rpId - Relying party ID.
+   * @param {string} params.rpName - RP display name.
+   * @param {object} params.user - {id, name, displayName} from WebAuthn options.
+   * @param {string} params.challenge - Base64url challenge from the RP.
+   * @param {string} params.origin - Page origin.
+   * @returns {Promise<object>} Full registration response for content script.
+   */
+  async function registerFromWebAuthn({ rpId, rpName, user, challenge, origin }) {
+    if (!VaultEngine.isUnlocked()) {
+      throw new Error('Vault must be unlocked');
+    }
+
+    // Security validation
+    if (typeof SecurityValidator !== 'undefined' && origin) {
+      const originCheck = SecurityValidator.validateOrigin(origin);
+      if (!originCheck.valid) {
+        throw new Error(`Origin validation failed: ${originCheck.reason}`);
+      }
+    }
+
+    // Add user to vault if not exists
+    const vaultUserId = await VaultEngine.addUser({
+      displayName: user.displayName || user.name,
+      entraUpn: user.name
+    });
+
+    // Build clientDataJSON and hash (matching what the browser would produce)
+    const clientDataJSON = JSON.stringify({
+      type: 'webauthn.create',
+      challenge: challenge,
+      origin: origin,
+      crossOrigin: false
+    });
+    const clientDataHash = await CryptoEngine.sha256(
+      new TextEncoder().encode(clientDataJSON)
+    );
+
+    // Generate keys and build attestation
+    const { privateKey, publicKey, keyPair } = await CryptoEngine.generateWebAuthnKeyPair();
+    const credentialId = CryptoEngine.generateCredentialId();
+
+    const storedCredId = await VaultEngine.storePasskey({
+      rpId,
+      rpName: rpName || rpId,
+      userId: vaultUserId,
+      privateKey,
+      publicKey,
+      credentialId
+    });
+
+    const attestationObjectBytes = await AttestationBuilder.buildSelfAttestation({
+      rpId,
+      credentialId,
+      publicKeySpki: publicKey,
+      privateKey: keyPair.privateKey,
+      clientDataHash
+    });
+
+    return {
+      credentialId: storedCredId,
+      credentialIdRaw: CryptoEngine.base64UrlEncode(credentialId),
+      attestationObject: CryptoEngine.base64UrlEncode(attestationObjectBytes),
+      clientDataJSON: CryptoEngine.base64UrlEncode(
+        new TextEncoder().encode(clientDataJSON)
+      ),
+      publicKeySpki: CryptoEngine.base64UrlEncode(new Uint8Array(publicKey)),
+      publicKeyAlgorithm: -7,
       transports: ['internal'],
-      attestationObject: await _buildAttestationObject(publicKey, credentialId, rpId)
+      type: 'public-key'
     };
   }
 
   /**
    * Sign a WebAuthn authentication challenge using a stored passkey.
+   * Uses AttestationBuilder for proper authenticator data construction.
    */
   async function signChallenge({ credentialId, rpId, challenge, origin, userVerification = true }) {
     if (!credentialId || !rpId || !challenge) {
@@ -81,6 +182,7 @@ const AuthEngine = (() => {
       throw new Error('Vault must be unlocked to sign challenges');
     }
 
+    // Security validation
     if (typeof SecurityValidator !== 'undefined' && origin) {
       const originCheck = SecurityValidator.validateOrigin(origin);
       if (!originCheck.valid) {
@@ -102,8 +204,10 @@ const AuthEngine = (() => {
       const privateKey = await CryptoEngine.importPrivateKey(privateKeyBytes);
 
       const signCount = await VaultEngine.incrementSignCount(credentialId);
-      const flags = FLAGS.UP | (userVerification ? FLAGS.UV : 0);
-      const authenticatorData = await _buildAuthenticatorDataAsync(rpId, flags, signCount);
+      const flags = AttestationBuilder.FLAGS.UP | (userVerification ? AttestationBuilder.FLAGS.UV : 0);
+
+      // Use AttestationBuilder for proper authenticator data
+      const authenticatorData = await AttestationBuilder.buildAuthData(rpId, flags, signCount);
 
       const challengeB64url = CryptoEngine.base64UrlEncode(
         challenge instanceof Uint8Array ? challenge.buffer : challenge
@@ -119,6 +223,7 @@ const AuthEngine = (() => {
         new TextEncoder().encode(clientDataJSON)
       );
 
+      // Sign authenticatorData || clientDataHash
       const signedData = _concatenateBuffers(authenticatorData, new Uint8Array(clientDataHash));
       const signature = await CryptoEngine.sign(privateKey, signedData);
       const derSignature = _ecdsaSignatureToDer(new Uint8Array(signature));
@@ -168,49 +273,6 @@ const AuthEngine = (() => {
 
   // --- Internal helpers ---
 
-  async function _buildAuthenticatorDataAsync(rpId, flags, signCount) {
-    const encoder = new TextEncoder();
-    const rpIdHash = new Uint8Array(
-      await CryptoEngine.sha256(encoder.encode(rpId))
-    );
-    const authData = new Uint8Array(37);
-    authData.set(rpIdHash, 0);
-    authData[32] = flags;
-    authData[33] = (signCount >> 24) & 0xff;
-    authData[34] = (signCount >> 16) & 0xff;
-    authData[35] = (signCount >> 8) & 0xff;
-    authData[36] = signCount & 0xff;
-    return authData;
-  }
-
-  async function _buildAttestationObject(publicKeySpki, credentialId, rpId) {
-    const flags = FLAGS.UP | FLAGS.UV | FLAGS.AT;
-    const authData = await _buildAuthenticatorDataAsync(rpId, flags, 0);
-    return {
-      fmt: 'none',
-      attStmt: {},
-      authData: CryptoEngine.base64UrlEncode(authData)
-    };
-  }
-
-  async function _exportCosePublicKey(spkiBuffer) {
-    const key = await crypto.subtle.importKey(
-      'spki',
-      spkiBuffer,
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      true,
-      ['verify']
-    );
-    const jwk = await crypto.subtle.exportKey('jwk', key);
-    return {
-      kty: 2,     // EC2
-      alg: -7,    // ES256
-      crv: 1,     // P-256
-      x: jwk.x,
-      y: jwk.y
-    };
-  }
-
   function _ecdsaSignatureToDer(p1363Sig) {
     const halfLen = p1363Sig.length / 2;
     const r = p1363Sig.slice(0, halfLen);
@@ -234,13 +296,12 @@ const AuthEngine = (() => {
     const seqLen = 2 + rDer.length + 2 + sDer.length;
     const der = new Uint8Array(2 + seqLen);
     let offset = 0;
-    der[offset++] = 0x30; // SEQUENCE
+    der[offset++] = 0x30;
     der[offset++] = seqLen;
-    der[offset++] = 0x02; // INTEGER
+    der[offset++] = 0x02;
     der[offset++] = rDer.length;
-    der.set(rDer, offset);
-    offset += rDer.length;
-    der[offset++] = 0x02; // INTEGER
+    der.set(rDer, offset); offset += rDer.length;
+    der[offset++] = 0x02;
     der[offset++] = sDer.length;
     der.set(sDer, offset);
     return der;
@@ -254,8 +315,8 @@ const AuthEngine = (() => {
   }
 
   return Object.freeze({
-    AAGUID,
     registerPasskey,
+    registerFromWebAuthn,
     signChallenge,
     getAvailablePasskeys,
     verifySignature

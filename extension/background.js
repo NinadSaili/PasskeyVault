@@ -14,6 +14,8 @@
 // Import engine modules into service worker scope
 importScripts(
   'cryptoEngine.js',
+  'cborEncoder.js',
+  'attestation.js',
   'securityValidator.js',
   'vaultEngine.js',
   'authEngine.js',
@@ -258,6 +260,26 @@ async function _handleMessage(message, sender) {
       return SecurityValidator.validateSigningRequest(payload);
 
     // --- Content Script Signals ---
+    case 'content.webauthnCreate': {
+      // Content script intercepted navigator.credentials.create()
+      if (!VaultEngine.isUnlocked()) {
+        return { action: 'requestUnlock' };
+      }
+
+      try {
+        const registration = await AuthEngine.registerFromWebAuthn({
+          rpId: payload.rpId,
+          rpName: payload.rpName,
+          user: payload.user,
+          challenge: payload.challenge,
+          origin: payload.origin
+        });
+        return { registration };
+      } catch (err) {
+        return { action: 'registrationError', error: err.message };
+      }
+    }
+
     case 'content.webauthnDetected': {
       // Content script detected a WebAuthn API call on the page
       const tabId = sender.tab ? sender.tab.id : null;

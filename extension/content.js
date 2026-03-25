@@ -160,6 +160,64 @@
   function interceptWebAuthnApi() {
     if (!navigator.credentials) return;
 
+    // --- Intercept navigator.credentials.create() ---
+    const originalCreate = navigator.credentials.create.bind(navigator.credentials);
+
+    navigator.credentials.create = async function(options) {
+      if (!options || !options.publicKey) {
+        return originalCreate(options);
+      }
+
+      const publicKeyOptions = options.publicKey;
+      const rpId = publicKeyOptions.rp?.id || window.location.hostname;
+      const rpName = publicKeyOptions.rp?.name || rpId;
+
+      const originCheck = await sendToBackground('security.validateOrigin', {
+        origin: window.location.origin
+      });
+      if (!originCheck || !originCheck.valid) {
+        return originalCreate(options);
+      }
+
+      // Check if ES256 (alg -7) is in the allowed algorithms
+      const supportsES256 = (publicKeyOptions.pubKeyCredParams || [])
+        .some(p => p.alg === -7);
+      if (!supportsES256) {
+        return originalCreate(options);
+      }
+
+      const challengeB64 = arrayBufferToBase64Url(publicKeyOptions.challenge);
+      const user = {
+        id: arrayBufferToBase64Url(publicKeyOptions.user.id),
+        name: publicKeyOptions.user.name,
+        displayName: publicKeyOptions.user.displayName
+      };
+
+      try {
+        const response = await sendToBackground('content.webauthnCreate', {
+          rpId,
+          rpName,
+          user,
+          challenge: challengeB64,
+          origin: window.location.origin,
+          attestation: publicKeyOptions.attestation || 'none'
+        });
+
+        if (response && response.registration) {
+          return buildCreateResponse(response.registration);
+        }
+
+        if (response && response.action === 'requestUnlock') {
+          showNotification('PasskeyVault is locked - unlock to register passkeys');
+        }
+
+        return originalCreate(options);
+      } catch {
+        return originalCreate(options);
+      }
+    };
+
+    // --- Intercept navigator.credentials.get() ---
     const originalGet = navigator.credentials.get.bind(navigator.credentials);
 
     navigator.credentials.get = async function(options) {
@@ -207,18 +265,59 @@
   }
 
   /* ------------------------------------------------ */
-  /* BUILD WEBAUTHN RESPONSE                          */
+  /* BUILD WEBAUTHN RESPONSES                         */
   /* ------------------------------------------------ */
+
+  /**
+   * Build a PublicKeyCredential response for navigator.credentials.create().
+   */
+  function buildCreateResponse(registration) {
+    const credentialId = registration.credentialId;
+    const rawId = base64UrlToArrayBuffer(registration.credentialIdRaw || credentialId);
+    const attestationObject = base64UrlToArrayBuffer(registration.attestationObject);
+    const clientDataJSON = base64UrlToArrayBuffer(registration.clientDataJSON);
+
+    const response = {
+      id: credentialId,
+      rawId: rawId,
+      type: 'public-key',
+      authenticatorAttachment: 'platform',
+      response: {
+        attestationObject: attestationObject,
+        clientDataJSON: clientDataJSON,
+        getTransports: () => ['internal'],
+        getPublicKeyAlgorithm: () => -7,
+        getAuthenticatorData: () => {
+          // Extract authData from the attestation object (first field after CBOR map header)
+          // The RP can also get this from the attestation object directly
+          return attestationObject;
+        }
+      },
+      getClientExtensionResults: () => ({})
+    };
+
+    // Add getPublicKey if SPKI data available
+    if (registration.publicKeySpki) {
+      response.response.getPublicKey = () => base64UrlToArrayBuffer(registration.publicKeySpki);
+    }
+
+    return response;
+  }
+
+  /**
+   * Build a PublicKeyCredential response for navigator.credentials.get().
+   */
   function buildCredentialResponse(assertion) {
     return {
       id: assertion.credentialId,
       rawId: base64UrlToArrayBuffer(assertion.credentialId),
       type: 'public-key',
+      authenticatorAttachment: 'platform',
       response: {
         authenticatorData: base64UrlToArrayBuffer(assertion.authenticatorData),
         clientDataJSON: base64UrlToArrayBuffer(assertion.clientDataJSON),
         signature: base64UrlToArrayBuffer(assertion.signature),
-        userHandle: null
+        userHandle: assertion.userHandle ? base64UrlToArrayBuffer(assertion.userHandle) : null
       },
       getClientExtensionResults: () => ({})
     };
