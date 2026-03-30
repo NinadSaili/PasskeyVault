@@ -34,12 +34,34 @@
 
   function init() {
     log('Content script loaded on', window.location.hostname, window.location.pathname);
+    log('Document readyState:', document.readyState);
     interceptWebAuthnApi();
+
+    // Start detection when DOM is ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', startDetection);
+    } else {
+      startDetection();
+    }
+  }
+
+  function startDetection() {
+    log('Starting login detection');
     observeDomChanges();
-    // Give page time to render dynamic content, then detect
-    setTimeout(() => detectLoginStage(), 500);
-    setTimeout(() => detectLoginStage(), 1500);
-    setTimeout(() => detectLoginStage(), 3000);
+
+    // Microsoft login renders forms dynamically via JS.
+    // Poll multiple times to catch late-rendered elements.
+    let attempts = 0;
+    const maxAttempts = 10;
+    function poll() {
+      attempts++;
+      log('Detection poll', attempts + '/' + maxAttempts);
+      detectLoginStage();
+      if (attempts < maxAttempts && !hasFilledUsername) {
+        setTimeout(poll, attempts < 3 ? 500 : 1000);
+      }
+    }
+    poll();
   }
 
   /* ------------------------------------------------ */
