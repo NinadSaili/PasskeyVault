@@ -558,7 +558,7 @@ console.log('\n\x1b[1m=== Test 12: Manifest Validation ===\x1b[0m');
   const cs = manifest.content_scripts[0];
   assert(cs.matches.some(m => m.includes('microsoftonline.com')), 'Manifest: content script on microsoftonline.com');
   assertEq(cs.js, ['content.js'], 'Manifest: content script is content.js');
-  assertEq(cs.run_at, 'document_idle', 'Manifest: content script runs at document_idle');
+  assertEq(cs.run_at, 'document_end', 'Manifest: content script runs at document_end');
   assertEq(cs.all_frames, true, 'Manifest: content script runs in all frames');
 
   // CSP

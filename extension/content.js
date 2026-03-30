@@ -1,6 +1,6 @@
 /**
  * Content Script - PasskeyVault page-level authentication orchestrator.
- * Production version with Microsoft login stage detection.
+ * Handles Microsoft Entra ID login: auto-fill credentials, intercept WebAuthn.
  */
 'use strict';
 (() => {
@@ -19,13 +19,12 @@
   const SELECTORS = {
     usernameInput: 'input[name="loginfmt"]',
     passwordInput: 'input[name="passwd"]',
-    submitButton: 'input[type="submit"], button[type="submit"]',
     nextButton: '#idSIButton9',
+    submitButton: 'input[type="submit"], button[type="submit"]',
     fidoLink: '#fidoLink, a[data-value="FidoCredential"]',
     passkeyOption: '[data-value="Fido2"], [data-value="FidoCredential"]',
     otherWayToSignIn: '#signInAnotherWay',
-    errorMessage: '#passwordError, #usernameError, .alert-error',
-    // Account picker page selectors
+    passwordOption: '[data-value="Password"]',
     accountTile: '.table[role="option"], .tile-container .table, [data-test-id="accountTile"]',
     useAnotherAccount: '#otherTile, #otherTileText, [data-test-id="otherTile"]'
   };
@@ -34,10 +33,7 @@
 
   function init() {
     log('Content script loaded on', window.location.hostname, window.location.pathname);
-    log('Document readyState:', document.readyState);
     interceptWebAuthnApi();
-
-    // Start detection when DOM is ready
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', startDetection);
     } else {
@@ -48,16 +44,12 @@
   function startDetection() {
     log('Starting login detection');
     observeDomChanges();
-
-    // Microsoft login renders forms dynamically via JS.
-    // Poll multiple times to catch late-rendered elements.
+    // Poll to catch dynamically rendered forms
     let attempts = 0;
-    const maxAttempts = 10;
     function poll() {
       attempts++;
-      log('Detection poll', attempts + '/' + maxAttempts);
       detectLoginStage();
-      if (attempts < maxAttempts && !hasFilledUsername) {
+      if (attempts < 10 && !hasFilledUsername) {
         setTimeout(poll, attempts < 3 ? 500 : 1000);
       }
     }
@@ -69,110 +61,100 @@
   /* ------------------------------------------------ */
   function simulateInput(element, value) {
     element.focus();
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+    const nativeSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
     ).set;
-    nativeInputValueSetter.call(element, value);
-
-    element.dispatchEvent(new Event('focus', { bubbles: true }));
+    nativeSetter.call(element, value);
     element.dispatchEvent(new Event('input', { bubbles: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
-    element.dispatchEvent(new Event('blur', { bubbles: true }));
   }
 
   /* ------------------------------------------------ */
   /* LOGIN STAGE DETECTION                            */
+  /*                                                  */
+  /* Key insight: Microsoft login pages have BOTH     */
+  /* username and password inputs in the DOM at all   */
+  /* times. The password field is "hidden" but still  */
+  /* has non-zero dimensions. We CANNOT rely on       */
+  /* visibility checks. Instead, enforce strict order:*/
+  /*   1. Always fill username first                  */
+  /*   2. Only fill password AFTER username is done   */
   /* ------------------------------------------------ */
-  function isVisible(el) {
-    if (!el) return false;
-    // Check both CSS visibility and Microsoft's display toggling
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden') return false;
-    // Also check parent containers — MSFT hides the password via parent div
-    const rect = el.getBoundingClientRect();
-    return rect.height > 0 && rect.width > 0;
-  }
-
   function detectLoginStage() {
+    if (isProcessing) return;
+
     const usernameField = document.querySelector(SELECTORS.usernameInput);
     const passwordField = document.querySelector(SELECTORS.passwordInput);
     const accountTiles = document.querySelectorAll(SELECTORS.accountTile);
     const otherWay = document.querySelector(SELECTORS.otherWayToSignIn);
-    const passwordOption = document.querySelector('[data-value="Password"]');
+    const passwordOption = document.querySelector(SELECTORS.passwordOption);
 
-    // Check actual visibility, not just DOM presence
-    const usernameVisible = isVisible(usernameField);
-    const passwordVisible = isVisible(passwordField);
-
-    log('Stage detection:', {
-      usernameVisible,
-      passwordVisible,
-      accountTileCount: accountTiles.length,
-      hasOtherWay: !!otherWay,
-      hasPasswordOption: !!passwordOption,
-      hasFilledUsername,
-      hasFilledPassword,
-      isProcessing
+    log('Stage:', {
+      hasUsername: !!usernameField,
+      hasPassword: !!passwordField,
+      tiles: accountTiles.length,
+      filledUser: hasFilledUsername,
+      filledPass: hasFilledPassword
     });
 
-    // Username input page — visible username field, password hidden or absent
-    if (usernameVisible && !passwordVisible && !hasFilledUsername) {
-      attemptUsernameFill();
+    // STEP 1: Username must be filled first (strict ordering)
+    if (!hasFilledUsername) {
+      // If there's a username input field, fill it
+      if (usernameField) {
+        attemptUsernameFill();
+        return;
+      }
+      // Pure account picker page (no input field, only tiles)
+      if (accountTiles.length > 0) {
+        attemptAccountPickerSelect(accountTiles);
+        return;
+      }
+      // Form not rendered yet — wait for next poll/observer
       return;
     }
 
-    // Account picker page (tiles only, no visible input)
-    if (accountTiles.length > 0 && !hasFilledUsername && !usernameVisible) {
-      attemptAccountPickerSelect(accountTiles);
-      return;
-    }
-
-    // Password input page — password field is now visible
-    if (passwordVisible && !hasFilledPassword) {
+    // STEP 2: After username, handle password (only on page reload/navigation)
+    if (!hasFilledPassword && passwordField) {
       attemptPasswordFill();
       return;
     }
 
-    // "Sign in another way" prompt
-    if (otherWay && !hasFilledPassword) {
+    // STEP 3: Handle "Sign in another way" or method picker
+    if (otherWay) {
       log('Clicking "Sign in another way"');
-      setTimeout(() => otherWay.click(), 400);
+      isProcessing = true;
+      setTimeout(() => { otherWay.click(); isProcessing = false; }, 400);
       return;
     }
-
-    // Password option in the method picker
-    if (passwordOption && !hasFilledPassword) {
+    if (passwordOption) {
       log('Clicking "Password" option');
-      setTimeout(() => passwordOption.click(), 400);
+      isProcessing = true;
+      setTimeout(() => { passwordOption.click(); isProcessing = false; }, 400);
     }
   }
 
   /* ------------------------------------------------ */
-  /* ACCOUNT PICKER ("Pick an account" page)          */
+  /* ACCOUNT PICKER                                   */
   /* ------------------------------------------------ */
   async function attemptAccountPickerSelect(tiles) {
     if (isProcessing) return;
     isProcessing = true;
-    log('Account picker detected with', tiles.length, 'tiles');
+    log('Account picker with', tiles.length, 'tiles');
 
     try {
       const hint = await sendToBackground('vault.getLoginHint', {
         domain: window.location.hostname
       });
       if (!hint || !hint.username) {
-        log('No login hint available');
+        log('No login hint for account picker');
         isProcessing = false;
         return;
       }
 
-      log('Looking for account tile matching:', hint.username);
-      const targetEmail = hint.username.toLowerCase();
-
-      // Search all tiles for matching email text
+      const target = hint.username.toLowerCase();
       for (const tile of tiles) {
-        const tileText = (tile.textContent || '').toLowerCase();
-        if (tileText.includes(targetEmail)) {
-          log('Found matching account tile, clicking');
+        if ((tile.textContent || '').toLowerCase().includes(target)) {
+          log('Clicking matching tile for:', hint.username);
           hasFilledUsername = true;
           tile.click();
           isProcessing = false;
@@ -180,134 +162,111 @@
         }
       }
 
-      // No matching tile found — click "Use another account" if available
+      // No match — click "Use another account"
       const useAnother = document.querySelector(SELECTORS.useAnotherAccount);
       if (useAnother) {
         log('No matching tile, clicking "Use another account"');
         useAnother.click();
-        // After clicking, the username input page should appear
-        // The MutationObserver will re-trigger detectLoginStage
       }
-
       isProcessing = false;
     } catch (err) {
-      log('Account picker error:', err);
+      log('Account picker error:', err.message || err);
       isProcessing = false;
     }
   }
 
   /* ------------------------------------------------ */
-  /* USERNAME STAGE                                   */
+  /* USERNAME FILL                                    */
   /* ------------------------------------------------ */
   async function attemptUsernameFill() {
     if (isProcessing || hasFilledUsername) return;
     isProcessing = true;
-    log('Attempting username fill for domain:', window.location.hostname);
+    log('Attempting username fill');
 
     try {
-      // First try vault.getLoginHint (checks credentials then passkey users)
       const hint = await sendToBackground('vault.getLoginHint', {
         domain: window.location.hostname
       });
-      log('Login hint response:', JSON.stringify(hint));
+      log('Login hint:', JSON.stringify(hint));
 
-      if (!hint || !hint.username) {
-        // Also try vault.getCredential directly as fallback
-        const cred = await sendToBackground('vault.getCredential', {
-          domain: window.location.hostname
-        });
-        log('Direct credential lookup:', JSON.stringify(cred));
-
-        if (cred && cred.username) {
-          fillUsernameField(cred.username, 'credential-direct');
-        } else {
-          log('No login hint or credential found');
-          isProcessing = false;
-        }
+      const username = hint && hint.username;
+      if (!username) {
+        log('No username available from vault');
+        isProcessing = false;
         return;
       }
 
-      fillUsernameField(hint.username, hint.source);
+      const field = document.querySelector(SELECTORS.usernameInput);
+      if (!field) {
+        log('Username field gone from DOM');
+        isProcessing = false;
+        return;
+      }
+
+      log('Filling username:', username, '(source:', hint.source + ')');
+      simulateInput(field, username);
+      hasFilledUsername = true;
+
+      const next = document.querySelector(SELECTORS.nextButton);
+      if (next) {
+        log('Clicking Next in 800ms');
+        setTimeout(() => { next.click(); isProcessing = false; }, 800);
+      } else {
+        isProcessing = false;
+      }
     } catch (err) {
       log('Username fill error:', err.message || err);
       isProcessing = false;
     }
   }
 
-  function fillUsernameField(username, source) {
-    const usernameField = document.querySelector(SELECTORS.usernameInput);
-    if (!usernameField) {
-      log('Username field not found in DOM');
-      isProcessing = false;
-      return;
-    }
-
-    log('Filling username:', username, '(source:', source + ')');
-    simulateInput(usernameField, username);
-    hasFilledUsername = true;
-
-    const next = document.querySelector(SELECTORS.nextButton);
-    if (next) {
-      log('Clicking Next button in 800ms');
-      setTimeout(() => {
-        next.click();
-        isProcessing = false;
-      }, 800);
-    } else {
-      log('Next button not found');
-      isProcessing = false;
-    }
-  }
-
   /* ------------------------------------------------ */
-  /* PASSWORD STAGE                                   */
+  /* PASSWORD FILL                                    */
   /* ------------------------------------------------ */
   async function attemptPasswordFill() {
     if (isProcessing || hasFilledPassword) return;
     isProcessing = true;
-    log('Attempting password fill for domain:', window.location.hostname);
+    log('Attempting password fill');
 
     try {
-      const credential = await sendToBackground('vault.getCredential', {
+      const cred = await sendToBackground('vault.getCredential', {
         domain: window.location.hostname
       });
-      log('Password credential lookup result:', credential ? 'found (username: ' + credential.username + ')' : 'null');
-      if (!credential || !credential.password) {
-        log('No credential found for password fill');
+      log('Credential lookup:', cred ? 'found' : 'null');
+
+      if (!cred || !cred.password) {
+        log('No credential/password for this domain');
         isProcessing = false;
         return;
       }
 
-      const passwordField = document.querySelector(SELECTORS.passwordInput);
-      if (!passwordField) {
+      const field = document.querySelector(SELECTORS.passwordInput);
+      if (!field) {
         log('Password field not found');
         isProcessing = false;
         return;
       }
 
       log('Filling password');
-      simulateInput(passwordField, credential.password);
+      simulateInput(field, cred.password);
       hasFilledPassword = true;
 
       const submit = document.querySelector(SELECTORS.nextButton) ||
                      document.querySelector(SELECTORS.submitButton);
       if (submit) {
         log('Clicking submit in 800ms');
-        setTimeout(() => {
-          submit.click();
-          isProcessing = false;
-        }, 800);
+        setTimeout(() => { submit.click(); isProcessing = false; }, 800);
       } else {
         isProcessing = false;
       }
     } catch (err) {
-      log('Password fill error:', err);
+      log('Password fill error:', err.message || err);
       isProcessing = false;
     }
   }
 
   /* ------------------------------------------------ */
-  /* DOM OBSERVER (THROTTLED)                         */
+  /* DOM OBSERVER                                     */
   /* ------------------------------------------------ */
   let observerTimeout;
   function observeDomChanges() {
@@ -340,10 +299,9 @@
     sendToBackground('auth.getAvailable', {
       rpId: window.location.hostname
     }).then((response) => {
-      if (response.passkeys && response.passkeys.length > 0) {
-        const fidoLink = document.querySelector(SELECTORS.fidoLink);
-        const passkeyOption = document.querySelector(SELECTORS.passkeyOption);
-        const target = fidoLink || passkeyOption;
+      if (response && response.passkeys && response.passkeys.length > 0) {
+        const target = document.querySelector(SELECTORS.fidoLink) ||
+                       document.querySelector(SELECTORS.passkeyOption);
         if (target) {
           log('Clicking passkey option');
           target.click();
@@ -358,103 +316,76 @@
   function interceptWebAuthnApi() {
     if (!navigator.credentials) return;
 
-    // --- Intercept navigator.credentials.create() ---
     const originalCreate = navigator.credentials.create.bind(navigator.credentials);
-
     navigator.credentials.create = async function(options) {
-      if (!options || !options.publicKey) {
-        return originalCreate(options);
-      }
+      if (!options || !options.publicKey) return originalCreate(options);
 
-      const publicKeyOptions = options.publicKey;
-      const rpId = publicKeyOptions.rp?.id || window.location.hostname;
-      const rpName = publicKeyOptions.rp?.name || rpId;
+      const pk = options.publicKey;
+      const rpId = pk.rp?.id || window.location.hostname;
 
-      const originCheck = await sendToBackground('security.validateOrigin', {
+      const originOk = await sendToBackground('security.validateOrigin', {
         origin: window.location.origin
       });
-      if (!originCheck || !originCheck.valid) {
-        return originalCreate(options);
-      }
-
-      // Check if ES256 (alg -7) is in the allowed algorithms
-      const supportsES256 = (publicKeyOptions.pubKeyCredParams || [])
-        .some(p => p.alg === -7);
-      if (!supportsES256) {
-        return originalCreate(options);
-      }
-
-      const challengeB64 = arrayBufferToBase64Url(publicKeyOptions.challenge);
-      const user = {
-        id: arrayBufferToBase64Url(publicKeyOptions.user.id),
-        name: publicKeyOptions.user.name,
-        displayName: publicKeyOptions.user.displayName
-      };
+      if (!originOk || !originOk.valid) return originalCreate(options);
+      if (!(pk.pubKeyCredParams || []).some(p => p.alg === -7)) return originalCreate(options);
 
       try {
+        log('Intercepted credentials.create() for rpId:', rpId);
         const response = await sendToBackground('content.webauthnCreate', {
           rpId,
-          rpName,
-          user,
-          challenge: challengeB64,
+          rpName: pk.rp?.name || rpId,
+          user: {
+            id: arrayBufferToBase64Url(pk.user.id),
+            name: pk.user.name,
+            displayName: pk.user.displayName
+          },
+          challenge: arrayBufferToBase64Url(pk.challenge),
           origin: window.location.origin,
-          attestation: publicKeyOptions.attestation || 'none'
+          attestation: pk.attestation || 'none'
         });
-
         if (response && response.registration) {
+          log('Returning vault-generated registration');
           return buildCreateResponse(response.registration);
         }
-
         if (response && response.action === 'requestUnlock') {
-          showNotification('PasskeyVault is locked - unlock to register passkeys');
+          showNotification('PasskeyVault is locked — unlock to register passkeys');
         }
-
         return originalCreate(options);
       } catch {
         return originalCreate(options);
       }
     };
 
-    // --- Intercept navigator.credentials.get() ---
     const originalGet = navigator.credentials.get.bind(navigator.credentials);
-
     navigator.credentials.get = async function(options) {
-      if (!options || !options.publicKey) {
-        return originalGet(options);
-      }
+      if (!options || !options.publicKey) return originalGet(options);
 
-      const publicKeyOptions = options.publicKey;
-      const rpId = publicKeyOptions.rpId || window.location.hostname;
+      const pk = options.publicKey;
+      const rpId = pk.rpId || window.location.hostname;
 
-      const originCheck = await sendToBackground('security.validateOrigin', {
+      const originOk = await sendToBackground('security.validateOrigin', {
         origin: window.location.origin
       });
-      if (!originCheck || !originCheck.valid) {
-        return originalGet(options);
-      }
-
-      const challengeB64 = arrayBufferToBase64Url(publicKeyOptions.challenge);
-      const allowCredentials = (publicKeyOptions.allowCredentials || []).map(c => ({
-        id: arrayBufferToBase64Url(c.id),
-        type: c.type
-      }));
+      if (!originOk || !originOk.valid) return originalGet(options);
 
       try {
+        log('Intercepted credentials.get() for rpId:', rpId);
         const response = await sendToBackground('content.webauthnDetected', {
           rpId,
-          challenge: challengeB64,
+          challenge: arrayBufferToBase64Url(pk.challenge),
           origin: window.location.origin,
-          allowCredentials
+          allowCredentials: (pk.allowCredentials || []).map(c => ({
+            id: arrayBufferToBase64Url(c.id),
+            type: c.type
+          }))
         });
-
-        if (response.action === 'signedAssertion') {
+        if (response && response.action === 'signedAssertion') {
+          log('Returning vault-signed assertion');
           return buildCredentialResponse(response.assertion);
         }
-
-        if (response.action === 'requestUnlock') {
-          showNotification('PasskeyVault locked');
+        if (response && response.action === 'requestUnlock') {
+          showNotification('PasskeyVault locked — unlock to use passkeys');
         }
-
         return originalGet(options);
       } catch {
         return originalGet(options);
@@ -465,33 +396,28 @@
   /* ------------------------------------------------ */
   /* BUILD WEBAUTHN RESPONSES                         */
   /* ------------------------------------------------ */
-
-  function buildCreateResponse(registration) {
-    const credentialId = registration.credentialId;
-    const rawId = base64UrlToArrayBuffer(registration.credentialIdRaw || credentialId);
-    const attestationObject = base64UrlToArrayBuffer(registration.attestationObject);
-    const clientDataJSON = base64UrlToArrayBuffer(registration.clientDataJSON);
-
-    const response = {
-      id: credentialId,
-      rawId: rawId,
+  function buildCreateResponse(reg) {
+    const rawId = base64UrlToArrayBuffer(reg.credentialIdRaw || reg.credentialId);
+    const attObj = base64UrlToArrayBuffer(reg.attestationObject);
+    const cdj = base64UrlToArrayBuffer(reg.clientDataJSON);
+    const resp = {
+      id: reg.credentialId,
+      rawId,
       type: 'public-key',
       authenticatorAttachment: 'platform',
       response: {
-        attestationObject: attestationObject,
-        clientDataJSON: clientDataJSON,
+        attestationObject: attObj,
+        clientDataJSON: cdj,
         getTransports: () => ['internal'],
         getPublicKeyAlgorithm: () => -7,
-        getAuthenticatorData: () => attestationObject
+        getAuthenticatorData: () => attObj
       },
       getClientExtensionResults: () => ({})
     };
-
-    if (registration.publicKeySpki) {
-      response.response.getPublicKey = () => base64UrlToArrayBuffer(registration.publicKeySpki);
+    if (reg.publicKeySpki) {
+      resp.response.getPublicKey = () => base64UrlToArrayBuffer(reg.publicKeySpki);
     }
-
-    return response;
+    return resp;
   }
 
   function buildCredentialResponse(assertion) {
@@ -511,7 +437,7 @@
   }
 
   /* ------------------------------------------------ */
-  /* BACKGROUND MESSAGING                             */
+  /* MESSAGING & UI                                   */
   /* ------------------------------------------------ */
   function sendToBackground(action, payload) {
     return new Promise((resolve, reject) => {
@@ -525,48 +451,35 @@
     });
   }
 
-  /* ------------------------------------------------ */
-  /* UI NOTIFICATION                                  */
-  /* ------------------------------------------------ */
   function showNotification(text) {
     const banner = document.createElement('div');
     banner.textContent = text;
     Object.assign(banner.style, {
-      position: 'fixed',
-      top: '10px',
-      right: '10px',
-      padding: '10px 16px',
-      background: '#0078d4',
-      color: '#fff',
-      borderRadius: '6px',
-      zIndex: '999999',
-      fontFamily: 'Segoe UI, sans-serif',
-      fontSize: '14px'
+      position: 'fixed', top: '10px', right: '10px',
+      padding: '10px 16px', background: '#0078d4', color: '#fff',
+      borderRadius: '6px', zIndex: '999999',
+      fontFamily: 'Segoe UI, sans-serif', fontSize: '14px'
     });
     document.body.appendChild(banner);
     setTimeout(() => banner.remove(), 4000);
   }
 
   /* ------------------------------------------------ */
-  /* UTILS                                            */
+  /* ENCODING UTILS                                   */
   /* ------------------------------------------------ */
   function arrayBufferToBase64Url(buffer) {
     const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
-  function base64UrlToArrayBuffer(base64url) {
-    let base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
-    while (base64.length % 4) base64 += '=';
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
+  function base64UrlToArrayBuffer(b64url) {
+    let b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return bytes.buffer;
   }
 })();
