@@ -83,6 +83,16 @@
   /* ------------------------------------------------ */
   /* LOGIN STAGE DETECTION                            */
   /* ------------------------------------------------ */
+  function isVisible(el) {
+    if (!el) return false;
+    // Check both CSS visibility and Microsoft's display toggling
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    // Also check parent containers — MSFT hides the password via parent div
+    const rect = el.getBoundingClientRect();
+    return rect.height > 0 && rect.width > 0;
+  }
+
   function detectLoginStage() {
     const usernameField = document.querySelector(SELECTORS.usernameInput);
     const passwordField = document.querySelector(SELECTORS.passwordInput);
@@ -90,9 +100,13 @@
     const otherWay = document.querySelector(SELECTORS.otherWayToSignIn);
     const passwordOption = document.querySelector('[data-value="Password"]');
 
+    // Check actual visibility, not just DOM presence
+    const usernameVisible = isVisible(usernameField);
+    const passwordVisible = isVisible(passwordField);
+
     log('Stage detection:', {
-      hasUsernameField: !!usernameField,
-      hasPasswordField: !!passwordField,
+      usernameVisible,
+      passwordVisible,
       accountTileCount: accountTiles.length,
       hasOtherWay: !!otherWay,
       hasPasswordOption: !!passwordOption,
@@ -101,21 +115,20 @@
       isProcessing
     });
 
-    // Username input page ("Sign in") — prioritize this over account tiles
-    // because some pages show both tiles AND the input field
-    if (usernameField && !passwordField && !hasFilledUsername) {
+    // Username input page — visible username field, password hidden or absent
+    if (usernameVisible && !passwordVisible && !hasFilledUsername) {
       attemptUsernameFill();
       return;
     }
 
-    // Account picker page ("Pick an account" — tiles only, no input field)
-    if (accountTiles.length > 0 && !hasFilledUsername && !usernameField) {
+    // Account picker page (tiles only, no visible input)
+    if (accountTiles.length > 0 && !hasFilledUsername && !usernameVisible) {
       attemptAccountPickerSelect(accountTiles);
       return;
     }
 
-    // Password input page
-    if (passwordField && !hasFilledPassword) {
+    // Password input page — password field is now visible
+    if (passwordVisible && !hasFilledPassword) {
       attemptPasswordFill();
       return;
     }
@@ -189,43 +202,59 @@
   async function attemptUsernameFill() {
     if (isProcessing || hasFilledUsername) return;
     isProcessing = true;
-    log('Attempting username fill');
+    log('Attempting username fill for domain:', window.location.hostname);
 
     try {
+      // First try vault.getLoginHint (checks credentials then passkey users)
       const hint = await sendToBackground('vault.getLoginHint', {
         domain: window.location.hostname
       });
-      log('Login hint response:', hint);
+      log('Login hint response:', JSON.stringify(hint));
 
       if (!hint || !hint.username) {
-        log('No login hint available');
-        isProcessing = false;
-        return;
-      }
+        // Also try vault.getCredential directly as fallback
+        const cred = await sendToBackground('vault.getCredential', {
+          domain: window.location.hostname
+        });
+        log('Direct credential lookup:', JSON.stringify(cred));
 
-      const usernameField = document.querySelector(SELECTORS.usernameInput);
-      if (!usernameField) {
-        log('Username field not found');
-        isProcessing = false;
-        return;
-      }
-
-      log('Filling username:', hint.username, '(source:', hint.source + ')');
-      simulateInput(usernameField, hint.username);
-      hasFilledUsername = true;
-
-      const next = document.querySelector(SELECTORS.nextButton);
-      if (next) {
-        log('Clicking Next button in 800ms');
-        setTimeout(() => {
-          next.click();
+        if (cred && cred.username) {
+          fillUsernameField(cred.username, 'credential-direct');
+        } else {
+          log('No login hint or credential found');
           isProcessing = false;
-        }, 800);
-      } else {
-        isProcessing = false;
+        }
+        return;
       }
+
+      fillUsernameField(hint.username, hint.source);
     } catch (err) {
-      log('Username fill error:', err);
+      log('Username fill error:', err.message || err);
+      isProcessing = false;
+    }
+  }
+
+  function fillUsernameField(username, source) {
+    const usernameField = document.querySelector(SELECTORS.usernameInput);
+    if (!usernameField) {
+      log('Username field not found in DOM');
+      isProcessing = false;
+      return;
+    }
+
+    log('Filling username:', username, '(source:', source + ')');
+    simulateInput(usernameField, username);
+    hasFilledUsername = true;
+
+    const next = document.querySelector(SELECTORS.nextButton);
+    if (next) {
+      log('Clicking Next button in 800ms');
+      setTimeout(() => {
+        next.click();
+        isProcessing = false;
+      }, 800);
+    } else {
+      log('Next button not found');
       isProcessing = false;
     }
   }
@@ -236,12 +265,13 @@
   async function attemptPasswordFill() {
     if (isProcessing || hasFilledPassword) return;
     isProcessing = true;
-    log('Attempting password fill');
+    log('Attempting password fill for domain:', window.location.hostname);
 
     try {
       const credential = await sendToBackground('vault.getCredential', {
         domain: window.location.hostname
       });
+      log('Password credential lookup result:', credential ? 'found (username: ' + credential.username + ')' : 'null');
       if (!credential || !credential.password) {
         log('No credential found for password fill');
         isProcessing = false;
